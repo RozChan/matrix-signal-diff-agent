@@ -30,9 +30,46 @@ matrix-signal-diff-agent/
 └─ temp/
 ```
 
+## 首次运行步骤（Windows 双击方式）
+
+1. 双击 `install_dependencies.bat` 安装依赖；
+2. 双击 `start_demo.bat` 启动工具；
+3. 浏览器打开后上传 4.0 和 5.1 Excel 文件；
+4. 点击“开始识别”。
+
+`start_demo.bat` 会在启动前检查 Streamlit 是否已安装。如果未检测到 Streamlit，会提示先运行 `install_dependencies.bat`，避免直接出现 `No module named streamlit` 报错。
+
 ## 安装依赖
 
-建议使用 Python 虚拟环境：
+### Windows 双击安装
+
+双击：
+
+```text
+install_dependencies.bat
+```
+
+该脚本会自动切换到项目目录，优先执行：
+
+```bat
+python -m pip install -r requirements.txt
+```
+
+如果默认源安装失败，脚本会尝试使用清华镜像源：
+
+```bat
+python -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+```
+
+如果 pip 不可用，脚本会先尝试：
+
+```bat
+python -m ensurepip --upgrade
+```
+
+### 命令行安装（可选）
+
+也可以手动使用 Python 虚拟环境：
 
 ```bash
 python -m venv .venv
@@ -60,7 +97,7 @@ pip install -r requirements.txt
 start_demo.bat
 ```
 
-脚本内容为：
+`start_demo.bat` 会先执行 `python -c "import streamlit"` 检查依赖；检查通过后再执行：
 
 ```bat
 python -m streamlit run app.py
