@@ -111,6 +111,31 @@ python -m streamlit run app.py
 
 启动后浏览器会打开本地 Streamlit 页面。
 
+### Windows 双击闪退排查
+
+如果双击 `install_dependencies.bat` 或 `start_demo.bat` 后窗口一闪而过，通常不是业务脚本问题，常见原因包括：
+
+- 当前 Windows 没有把 `python` 加入 `PATH`，批处理找不到 Python；
+- 当前 Python 环境没有安装 `pip` 或 `streamlit`；
+- 公司网络、代理或 pip 源导致依赖安装失败；
+- 批处理没有在项目目录中运行，找不到 `requirements.txt` 或 `app.py`。
+
+两个 bat 脚本都会自动切换到脚本所在目录，并在当前目录生成日志文件：
+
+```text
+install_dependencies.log
+start_demo.log
+```
+
+如果窗口仍然闪退，可以打开 `cmd`，手动进入项目目录后运行：
+
+```bat
+install_dependencies.bat
+start_demo.bat
+```
+
+然后把对应 `.log` 文件中的报错信息复制出来排查。
+
 ## 使用流程
 
 1. 在页面上传多个 EEA 4.0 矩阵 Excel 文件，支持 `.xlsx` / `.xlsm`；
