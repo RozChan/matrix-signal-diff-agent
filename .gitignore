@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.streamlit/
+input/
+output/
+temp/*
+!temp/.gitkeep
