@@ -233,3 +233,35 @@ temp/<task_id>/output/03_generate_compare_file5_local_v13_log.txt
 - 未使用数据库；
 - 未提供 FastAPI / 正式后端服务；
 - 未内置真实 Excel 样例数据。
+
+## AI 辅助复核与人工审核
+
+当前版本会在最终结果文件 `4.0和5.1同一信号差异点识别.xlsx` 中新增一个 sheet：
+
+```text
+AI辅助复核与人工审核明细
+```
+
+说明：
+
+1. AI 辅助复核默认关闭。
+2. 未开启 AI 时，仍会生成 `AI辅助复核与人工审核明细` sheet。
+3. 开启 AI 需要复制 `.env.example` 为 `.env` 并配置：
+
+```text
+LLM_ENABLED=true
+LLM_API_KEY=<你的 API key>
+LLM_BASE_URL=<OpenAI-compatible chat completions base url>
+LLM_MODEL=<模型名称>
+```
+
+4. AI 只复核 `信号值描述` 和 `单位` 等文本类差异。
+5. `信号长度`、`精度`、`偏移量`、`物理最小值`、`物理最大值` 等数值类差异不交给 AI 判断。
+6. AI 不会修改、删除、覆盖原始两个差异 sheet，也不会修改原始差异结果。
+7. 所有差异最终都需要人工审核，AI 结果仅作为人工参考。
+8. 人工审核结果可以在 Excel 的 `人工审核结果` 和 `人工备注` 列中填写。
+9. 当前版本不做网页端逐条审核。
+10. 当前版本不做审核后最终结果导出页。
+11. 当前版本不接飞书、不接 Confluence。
+
+如果 `LLM_ENABLED=false` 或未配置 API key，文本类差异会写入人工审核清单，并标记为 `未启用`，原有规则分析流程不受影响。
