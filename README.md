@@ -1,270 +1,160 @@
 # matrix-signal-diff-agent
 
-A local demo tool for EEA 4.0 / 5.1 signal matrix comparison, deduplication, and signal definition difference detection.
+`matrix-signal-diff-agent` 是一个本地 Streamlit Demo，用于基于已有 legacy Python 脚本识别 EEA 4.0 / 5.1 矩阵中“同一信号”的定义差异。
 
-## Project Background
+本阶段只做本地网页 Demo：不接飞书、不使用数据库，也不做正式服务化部署；AI 辅助复核默认关闭，只有用户自行配置 OpenAI-compatible 接口并勾选后才会调用模型。
 
-This project is used to compare EEA 4.0 and EEA 5.1 vehicle signal matrix Excel files.
+## 项目用途
 
-In some architecture upgrade cases, the signal name remains unchanged, but signal definition fields such as signal length, resolution, offset, physical min/max value, unit, or signal value description may change. If these changes are not identified by the vehicle-side system, they may cause vehicle issues.
+在架构升级场景中，4.0 与 5.1 矩阵里可能存在同名信号，但信号长度、精度、偏移量、物理最小值、物理最大值、单位或信号值描述发生变化。本工具会复用仓库中的 4 个 legacy 脚本，自动完成：
 
-The goal of this tool is to automatically detect signals that have the same name, or equivalent meaning, but different signal definitions between EEA 4.0 and EEA 5.1.
+1. 提取 4.0 / 5.1 全量信号矩阵清单；
+2. 按信号名称生成同名去重结果；
+3. 生成最终同一信号差异识别 Excel。
 
-## Current Status
-
-The current repository contains four Python scripts. These scripts already implement the core business logic.
-
-Current scripts:
-
-- `common_matrix_utils_local_v13.py`
-- `01_extract_full_matrix_local_v13.py`
-- `02_generate_dedup_signals_local_v13.py`
-- `03_generate_compare_file5_local_v13.py`
-
-The next development step is to refactor these scripts into reusable core modules and build a local Streamlit demo.
-
-## Existing Script Responsibilities
-
-### 1. `common_matrix_utils_local_v13.py`
-
-Common utility module.
-
-Main responsibilities:
-
-- Clean Excel cell text.
-- Normalize table headers.
-- Normalize ECU send/receive status.
-- Compare numeric fields.
-- Normalize and compare signal value descriptions.
-- Support enum description comparison, including:
-  - enum order differences;
-  - `0x01` vs `0x1`;
-  - range enum format such as `0x1~0x6: Reserved`.
-
-Current ECU status normalization rule:
-
-- `R/r` -> `r`, meaning receive.
-- `T/t/S/s` -> `s`, meaning send.
-
-It also supports parsing EEA 4.0 grouped ECU format, for example:
+## 工程结构
 
 ```text
-EMS_PHEV:s(HighRegulationArea:s,LowRegulationArea:s)
+matrix-signal-diff-agent/
+├─ app.py
+├─ requirements.txt
+├─ start_demo.bat
+├─ README.md
+├─ common_matrix_utils_local_v13.py
+├─ 01_extract_full_matrix_local_v13.py
+├─ 02_generate_dedup_signals_local_v13.py
+├─ 03_generate_compare_file5_local_v13.py
+├─ core/
+│  ├─ __init__.py
+│  └─ pipeline.py
+└─ temp/
 ```
 
-### 2. `01_extract_full_matrix_local_v13.py`
+## 首次运行步骤（Windows 双击方式）
 
-Extracts full signal matrix lists from local Excel files.
+1. 双击 `install_dependencies.bat` 安装依赖；
+2. 双击 `start_demo.bat` 启动工具；
+3. 浏览器打开后上传 4.0 和 5.1 Excel 文件；
+4. 点击“开始识别”。
 
-Input directories:
+`start_demo.bat` 会在启动前检查 Streamlit 是否已安装。如果未检测到 Streamlit，会提示先运行 `install_dependencies.bat`，避免直接出现 `No module named streamlit` 报错。
+
+## 安装依赖
+
+### Windows 双击安装
+
+双击：
 
 ```text
-input/4.0
-input/5.1
+install_dependencies.bat
 ```
 
-Main responsibilities:
+该脚本会自动切换到项目目录，优先执行：
 
-- Read all `.xlsx` and `.xlsm` files under `input/4.0` and `input/5.1`.
-- Automatically identify valid matrix sheets.
-- Exclude non-matrix sheets such as `History`, revision logs, and description sheets.
-- Extract signal information from valid matrix sheets.
-- Preserve source file, source sheet, and source row.
-- Extract signal definition fields:
-  - signal name;
-  - signal length;
-  - resolution;
-  - offset;
-  - physical min value;
-  - physical max value;
-  - unit;
-  - signal value description.
-- Extract ECU send/receive status columns from the right side of the matrix.
-
-Important business rules:
-
-- For EEA 4.0, ECU status should be output using grouped format:
-
-```text
-EMS_PHEV:s(HighRegulationArea:s,LowRegulationArea:s)
+```bat
+python -m pip install -r requirements.txt
 ```
 
-- For EEA 4.0, send ECU summary / receive ECU summary should also use grouped format:
+如果默认源安装失败，脚本会尝试使用清华镜像源：
 
-```text
-EMS_PHEV(HighRegulationArea,LowRegulationArea)
+```bat
+python -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
-- For EEA 5.1, ECU status remains line-by-line:
+如果 pip 不可用，脚本会先尝试：
 
-```text
-VCU_5IC_DK:s
-VCU_5IH_DK:s
-VCU_L4_DK:s
-VCU_TA_DK:s
+```bat
+python -m ensurepip --upgrade
 ```
 
-Output files:
+### 命令行安装（可选）
 
-```text
-output/26R1 4.0全量信号矩阵清单.xlsx
-output/26R2 5.1全量信号矩阵清单.xlsx
-```
-
-### 3. `02_generate_dedup_signals_local_v13.py`
-
-Generates deduplicated signal lists.
-
-Input files:
-
-```text
-output/26R1 4.0全量信号矩阵清单.xlsx
-output/26R2 5.1全量信号矩阵清单.xlsx
-```
-
-Main responsibilities:
-
-- Deduplicate signals by signal name.
-- Keep the first occurrence as the main signal definition.
-- Aggregate all source files where the same signal appears.
-- Aggregate all ECU send/receive status information.
-- Preserve EEA 4.0 grouped ECU format.
-
-Output files:
-
-```text
-output/26R1 4.0全量信号-同名去重后.xlsx
-output/26R2 5.1全量信号-同名去重后.xlsx
-```
-
-### 4. `03_generate_compare_file5_local_v13.py`
-
-Generates final signal difference comparison result.
-
-Input files:
-
-```text
-output/26R1 4.0全量信号-同名去重后.xlsx
-output/26R2 5.1全量信号-同名去重后.xlsx
-```
-
-Main responsibilities:
-
-- Compare EEA 4.0 and EEA 5.1 deduplicated signals.
-- Sheet 1: exact same-name signal comparison.
-- Sheet 2: VCU/HCU prefix-stripped matching.
-- Identify differences in the following fields:
-  - signal length;
-  - resolution;
-  - offset;
-  - physical min value;
-  - physical max value;
-  - unit;
-  - signal value description.
-
-ECU status fields are preserved for traceability but are not currently used as difference criteria.
-
-Output file:
-
-```text
-output/4.0和5.1同一信号差异点识别.xlsx
-```
-
-## Current Manual Usage
-
-Place EEA 4.0 Excel files in:
-
-```text
-input/4.0
-```
-
-Place EEA 5.1 Excel files in:
-
-```text
-input/5.1
-```
-
-Run scripts in order:
+也可以手动使用 Python 虚拟环境：
 
 ```bash
-python 01_extract_full_matrix_local_v13.py
-python 02_generate_dedup_signals_local_v13.py
-python 03_generate_compare_file5_local_v13.py
+python -m venv .venv
+# Windows
+.venv\Scripts\activate
+# macOS / Linux
+source .venv/bin/activate
+
+pip install -r requirements.txt
 ```
 
-Generated files are saved under:
+`requirements.txt` 至少包含：
+
+- `streamlit`
+- `openpyxl`
+- `pandas`
+
+## 启动方式
+
+### Windows 双击启动
+
+双击：
 
 ```text
-output/
+start_demo.bat
 ```
 
-## Target Demo Version
+`start_demo.bat` 会先执行 `python -c "import streamlit"` 检查依赖；检查通过后再执行：
 
-The next target is to build a local Streamlit demo.
-
-Expected user flow:
-
-1. Open a local web page.
-2. Upload multiple EEA 4.0 matrix Excel files.
-3. Upload multiple EEA 5.1 matrix Excel files.
-4. Click "Start Comparison".
-5. The system automatically runs the complete pipeline.
-6. The page shows progress and statistics.
-7. The user can download all intermediate and final result files.
-
-## Target Technical Stack
-
-Recommended stack:
-
-- Python
-- Streamlit
-- openpyxl
-- pandas, optional for statistics display
-- no database
-- no Feishu integration in the first version
-- no real LLM call in the first version
-
-## Refactoring Requirements
-
-The existing business logic should not be rewritten from scratch.
-
-The refactoring should:
-
-1. Create a `core/` directory.
-2. Move reusable logic into importable modules.
-3. Keep the original command-line scripts available.
-4. Avoid hardcoded paths such as `D:\signal_compare`.
-5. Support function parameters:
-   - `input_40_dir`
-   - `input_51_dir`
-   - `output_dir`
-
-Suggested core functions:
-
-```python
-run_extract(input_40_dir, input_51_dir, output_dir)
-run_dedup(output_dir)
-run_compare(output_dir)
-run_all(input_40_dir, input_51_dir, output_dir)
+```bat
+python -m streamlit run app.py
 ```
 
-## Streamlit Demo Requirements
+### 命令行启动
 
-The Streamlit app should include:
+```bash
+python -m streamlit run app.py
+```
 
-- Title: `EEA 4.0/5.1 矩阵同一信号差异识别工具`
-- Upload area for EEA 4.0 Excel files.
-- Upload area for EEA 5.1 Excel files.
-- Start button.
-- Progress display.
-- Result statistics.
-- Download buttons for each result file.
-- Download-all ZIP button.
-- Clear error messages if processing fails.
+启动后浏览器会打开本地 Streamlit 页面。
 
-## Expected Output Files
+### Windows 双击闪退排查
 
-The output file names must remain unchanged:
+如果双击 `install_dependencies.bat` 或 `start_demo.bat` 后窗口一闪而过，通常不是业务脚本问题，常见原因包括：
+
+- 当前 Windows 没有把 `python` 加入 `PATH`，批处理找不到 Python；
+- 当前 Python 环境没有安装 `pip` 或 `streamlit`；
+- 公司网络、代理或 pip 源导致依赖安装失败；
+- 批处理没有在项目目录中运行，找不到 `requirements.txt` 或 `app.py`。
+
+两个 bat 脚本都会自动切换到脚本所在目录，并在当前目录生成日志文件：
+
+```text
+install_dependencies.log
+start_demo.log
+```
+
+如果窗口仍然闪退，可以打开 `cmd`，手动进入项目目录后运行：
+
+```bat
+install_dependencies.bat
+start_demo.bat
+```
+
+然后把对应 `.log` 文件中的报错信息复制出来排查。
+
+## 使用流程
+
+1. 在页面上传多个 EEA 4.0 矩阵 Excel 文件，支持 `.xlsx` / `.xlsm`；
+2. 在页面上传多个 EEA 5.1 矩阵 Excel 文件，支持 `.xlsx` / `.xlsm`；
+3. 点击“开始识别”；
+4. 系统会自动创建临时任务目录：
+
+```text
+temp/<task_id>/input/4.0
+temp/<task_id>/input/5.1
+temp/<task_id>/output
+```
+
+5. 系统按顺序运行 01、02、03 三个 legacy 脚本；
+6. 页面展示进度、统计结果、单文件下载按钮和全部结果 ZIP 下载按钮。
+
+## 输出文件
+
+输出文件名保持 legacy 规则不变：
 
 ```text
 26R1 4.0全量信号矩阵清单.xlsx
@@ -274,52 +164,139 @@ The output file names must remain unchanged:
 4.0和5.1同一信号差异点识别.xlsx
 ```
 
-## Business Rules That Must Not Be Changed
+页面可单独下载上述 5 个结果文件，也可以下载全部结果 ZIP。
 
-The following business rules must be preserved:
+## 输出文件在哪里
 
-1. Do not collect `History` or other non-matrix sheets.
-2. `R/r` must be normalized to `r`.
-3. `T/t/S/s` must be normalized to `s`.
-4. EEA 4.0 ECU status must use grouped format:
+每次运行都会生成独立任务目录，输出位于：
 
 ```text
-EMS_PHEV:s(HighRegulationArea:s,LowRegulationArea:s)
+temp/<task_id>/output/
 ```
 
-5. EEA 4.0 send/receive ECU summary must also use grouped format:
+其中 `<task_id>` 是系统自动生成的 UUID。页面成功提示中也会展示本次任务目录路径。
+
+## 统计结果
+
+处理完成后，页面会展示：
+
+- 4.0 全量信号数量；
+- 5.1 全量信号数量；
+- 4.0 去重后信号数量；
+- 5.1 去重后信号数量；
+- 完全同名匹配信号数；
+- sheet1 差异行数；
+- sheet2 vcu-hcu 差异行数。
+
+统计从生成的 Excel 文件和 compare 阶段日志读取，不写死业务结果。
+
+## 错误查看
+
+如果任一步失败，页面会显示错误信息，并提供“错误详情（可复制）”。错误详情包含失败脚本名、返回码、stdout 和 stderr，便于定位 Excel 格式、依赖或 legacy 脚本执行问题。
+
+也可以查看临时任务目录下的 legacy 日志：
 
 ```text
-EMS_PHEV(HighRegulationArea,LowRegulationArea)
+temp/<task_id>/output/01_extract_full_matrix_local_v13_log.txt
+temp/<task_id>/output/02_generate_dedup_signals_local_v13_log.txt
+temp/<task_id>/output/03_generate_compare_file5_local_v13_log.txt
 ```
 
-6. EEA 5.1 ECU status should remain line-by-line.
-7. Deduplication is based on signal name.
-8. Signal definition fields keep the first occurrence after deduplication.
-9. Source files and ECU status must be aggregated during deduplication.
-10. Signal value description comparison must support:
-    - enum order differences;
-    - `0x01` vs `0x1`;
-    - range enum format such as `0x1~0x6: Reserved`.
+## 保留的 legacy 业务规则
 
-## Future Roadmap
+本 Demo 不从零重写业务规则。`core/pipeline.py` 会把以下 legacy 脚本复制到每次任务目录，并以任务目录为 `cwd` 顺序运行：
 
-### Phase 1
+- `common_matrix_utils_local_v13.py`
+- `01_extract_full_matrix_local_v13.py`
+- `02_generate_dedup_signals_local_v13.py`
+- `03_generate_compare_file5_local_v13.py`
 
-Local Streamlit demo.
+因此以下规则继续由 legacy 脚本保证：
 
-### Phase 2
+- 不收集 `History`、修改记录、说明页等非矩阵 sheet；
+- `R/r` 标准化为 `r`；
+- `T/t/S/s` 标准化为 `s`；
+- 4.0 ECU 收发状态保持首个 ECU 为主、后续括号格式；
+- 4.0 发送 ECU 汇总 / 接收 ECU 汇总保持括号格式；
+- 5.1 ECU 状态保持逐行输出；
+- 按信号名称去重；
+- 去重时信号定义字段保留首次出现；
+- 去重时信号来源文件和 ECU 状态汇总；
+- 文件五只输出匹配成功且 7 个字段存在差异的信号；
+- ECU 收发状态只作为追溯字段，不参与差异筛选；
+- 信号值描述比较继续支持枚举顺序差异、`0x01` / `0x1` 差异、范围枚举等规则。
 
-Add LLM-assisted review for suspicious text differences, such as typos or semantically similar descriptions.
+## 当前未实现内容
 
-### Phase 3
+- 未接入飞书；
+- 未提供内置大模型账号或默认联网模型；
+- 未使用数据库；
+- 未提供 FastAPI / 正式后端服务；
+- 未内置真实 Excel 样例数据。
 
-Package local demo with a double-click startup script.
+## AI 辅助复核与人工审核
 
-### Phase 4
+当前版本会在最终结果文件 `4.0和5.1同一信号差异点识别.xlsx` 中新增一个 sheet：
 
-Refactor core logic into a FastAPI service.
+```text
+AI辅助复核与人工审核明细
+```
 
-### Phase 5
+说明：
 
-Integrate with Feishu bot for task triggering and result delivery.
+1. AI 辅助复核默认关闭。
+2. 未开启 AI 时，仍会生成 `AI辅助复核与人工审核明细` sheet。
+3. 开启 AI 需要复制 `.env.example` 为 `.env` 并配置：
+
+```text
+LLM_ENABLED=true
+LLM_API_KEY=<你的 API key>
+LLM_BASE_URL=<OpenAI-compatible chat completions base url>
+LLM_MODEL=<模型名称>
+```
+
+4. AI 只复核 `信号值描述` 和 `单位` 等文本类差异。
+5. `信号长度`、`精度`、`偏移量`、`物理最小值`、`物理最大值` 等数值类差异不交给 AI 判断。
+6. AI 不会修改、删除、覆盖原始两个差异 sheet，也不会修改原始差异结果。
+7. 所有差异最终都需要人工审核，AI 结果仅作为人工参考。
+8. 人工审核结果可以在 Excel 的 `人工审核结果` 和 `人工备注` 列中填写。
+9. 当前版本不做网页端逐条审核。
+10. 当前版本不做审核后最终结果导出页。
+11. 当前版本不接飞书、不接 Confluence。
+
+如果 `LLM_ENABLED=false` 或未配置 API key，文本类差异会写入人工审核清单，并标记为 `未启用`，原有规则分析流程不受影响。
+
+### AI 配置排查
+
+如果页面提示“已勾选 AI 辅助复核，但未检测到 `LLM_ENABLED=true`”，请检查：
+
+1. `.env` 是否放在项目根目录，也就是 `app.py` 同级目录；
+2. Windows 是否把文件实际保存成了 `.env.txt`，建议开启“显示文件扩展名”确认；
+3. `.env` 中是否写成 `LLM_ENABLED=true`，不要写成 `True` 以外的其他值，建议全部小写；
+4. 修改 `.env` 后是否重新运行了 `start_demo.bat`；
+5. 是否已经重新运行 `install_dependencies.bat` 安装 `python-dotenv`；
+6. 当前版本也包含内置 `.env` 读取兜底逻辑，即使 `python-dotenv` 缺失，也会尝试读取项目根目录 `.env`。
+
+注意：不要把真实 `LLM_API_KEY` 发到聊天、截图或提交到 Git。`.gitignore` 已忽略 `.env`，但如果 key 已经泄露，应立即到模型平台吊销并重新生成。
+
+### AI 复核连接测试、超时和数量上限
+
+页面的 `AI 配置状态` 区域会展示：
+
+- `LLM_ENABLED` 当前值；
+- `LLM_BASE_URL` 是否已配置；
+- `LLM_MODEL` 当前值；
+- `LLM_API_KEY` 是否已配置（只显示已配置/未配置，不显示 key）；
+- 当前连接状态：未测试 / 连接成功 / 连接失败。
+
+点击 `测试大模型连接` 会发送一个极短的 OpenAI-compatible chat completions 请求，默认 15 秒超时，不会显示 API key。
+
+AI 正式复核调用的默认超时为 30 秒，可通过 `.env` 修改：
+
+```text
+LLM_TIMEOUT_SECONDS=30
+```
+
+页面提供 `本次最多 AI 复核条数` 输入框，默认 50。该上限只限制实际调用模型的文本类差异数量，失败和超时的请求也计入本次调用上限；所有差异仍会写入 `AI辅助复核与人工审核明细` sheet。超过上限的文本类差异会标记为未调用模型，并建议人工确认。
+
+如果未勾选 `启用 AI 辅助复核` 或 `LLM_ENABLED=false`，系统不会调用模型、不会等待网络，只会快速生成待人工审核明细。
