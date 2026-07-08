@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from pathlib import Path
 from typing import Any
 
 
-from .llm_client import LLMConfigurationError, LLMRequestError, call_chat_json, get_llm_config
+from .llm_client import LLMConfigurationError, LLMRequestError, LLMTimeoutError, call_chat_json, get_llm_config
 
 SOURCE_SHEETS = ["完全同名匹配对比结果", "vcu-hcu 同名匹配"]
 AI_REVIEW_SHEET = "AI辅助复核与人工审核明细"
@@ -54,6 +55,10 @@ EMPTY_STATS: dict[str, int] = {
     "unknown_count": 0,
     "not_applicable_count": 0,
     "llm_disabled_count": 0,
+    "text_diff_count": 0,
+    "ai_called_count": 0,
+    "ai_failed_count": 0,
+    "ai_limit_skipped_count": 0,
 }
 
 
@@ -152,6 +157,17 @@ def _unknown_review(reason: str) -> dict[str, str]:
     }
 
 
+def _limit_skipped_review() -> dict[str, str]:
+    return {
+        "AI是否复核": "否",
+        "AI判断结果": "无法判断",
+        "差异类型": "不适用",
+        "置信度": "不适用",
+        "AI判断理由": "超过本次 AI 复核数量上限，未调用模型",
+        "AI建议处理方式": "建议人工确认",
+    }
+
+
 def _prompt_messages(item: dict[str, str]) -> list[dict[str, str]]:
     system = (
         "你是车辆信号矩阵差异复核助手。你的任务是判断 4.0 和 5.1 的文本类差异是否可能只是"
@@ -194,17 +210,29 @@ def _ai_review(item: dict[str, str]) -> dict[str, str]:
     }
 
 
-def _review_item(item: dict[str, str], enable_ai: bool, llm_enabled: bool, stats: dict[str, Any]) -> dict[str, str]:
+def _review_item(item: dict[str, str], enable_ai: bool, llm_enabled: bool, stats: dict[str, Any], max_ai_review_items: int) -> dict[str, str]:
     field = item["差异字段"]
     if field in NUMERIC_FIELDS:
         review = _numeric_review()
     elif field in TEXT_REVIEW_FIELDS:
+        stats["text_diff_count"] += 1
         if not enable_ai or not llm_enabled:
             review = _disabled_review()
+        elif stats["ai_called_count"] >= max_ai_review_items:
+            stats["ai_limit_skipped_count"] += 1
+            review = _limit_skipped_review()
         else:
+            stats["ai_called_count"] += 1
             try:
                 review = _ai_review(item)
+            except LLMTimeoutError as exc:
+                stats["ai_failed_count"] += 1
+                warning = str(exc)
+                if warning not in stats["warnings"]:
+                    stats["warnings"].append(warning)
+                review = _unknown_review("模型请求超时")
             except (LLMConfigurationError, LLMRequestError) as exc:
+                stats["ai_failed_count"] += 1
                 warning = str(exc)
                 if warning not in stats["warnings"]:
                     stats["warnings"].append(warning)
@@ -269,24 +297,55 @@ def _style_sheet(ws) -> None:
     ws.auto_filter.ref = ws.dimensions
 
 
-def run_ai_review(compare_file_path: Path, enable_ai: bool = False) -> dict[str, Any]:
+def run_ai_review(compare_file_path: Path, enable_ai: bool = False, max_ai_review_items: int = 50, progress_callback=None) -> dict[str, Any]:
     """Append AI辅助复核与人工审核明细 sheet to the compare workbook."""
 
     compare_path = Path(compare_file_path)
-    stats: dict[str, Any] = {**EMPTY_STATS, "warnings": []}
+    started = time.perf_counter()
+    max_ai_review_items = max(0, int(max_ai_review_items))
+    stats: dict[str, Any] = {**EMPTY_STATS, "warnings": [], "max_ai_review_items": max_ai_review_items}
     config = get_llm_config()
     llm_enabled = config.enabled
 
+    def emit(**payload):
+        if progress_callback is not None:
+            progress_callback(payload)
+
     from openpyxl import load_workbook
 
+    emit(stage="正在解析差异明细")
     wb = load_workbook(compare_path)
     if AI_REVIEW_SHEET in wb.sheetnames:
         del wb[AI_REVIEW_SHEET]
+    base_items = _iter_review_base_items(wb)
+    total_items = len(base_items)
+    total_text_items = sum(1 for item in base_items if item["差异字段"] in TEXT_REVIEW_FIELDS)
+    if not enable_ai or not llm_enabled:
+        emit(stage="AI 未启用，仅生成待人工审核明细", total=total_items, text_total=total_text_items)
+    else:
+        emit(stage="正在执行 AI 复核", total=total_items, text_total=total_text_items, max_ai_review_items=max_ai_review_items)
+
     ws = wb.create_sheet(AI_REVIEW_SHEET)
     ws.append(REVIEW_HEADERS)
 
-    for item in _iter_review_base_items(wb):
-        review = _review_item(item, enable_ai=enable_ai, llm_enabled=llm_enabled, stats=stats)
+    completed = 0
+    for index, item in enumerate(base_items, start=1):
+        emit(
+            stage="正在执行 AI 复核" if enable_ai and llm_enabled else "AI 未启用，仅生成待人工审核明细",
+            current=index,
+            total=total_items,
+            signal_name=item.get("4.0信号名") or item.get("5.1信号名") or "",
+            completed=completed,
+            failed=stats["ai_failed_count"],
+        )
+        review = _review_item(
+            item,
+            enable_ai=enable_ai,
+            llm_enabled=llm_enabled,
+            stats=stats,
+            max_ai_review_items=max_ai_review_items,
+        )
+        completed += 1
         ws.append([
             item["来源Sheet"],
             item["4.0信号名"],
@@ -305,7 +364,9 @@ def run_ai_review(compare_file_path: Path, enable_ai: bool = False) -> dict[str,
             "",
         ])
 
+    emit(stage="正在写入 Excel", total=total_items, completed=completed, failed=stats["ai_failed_count"])
     _style_sheet(ws)
     wb.save(compare_path)
     wb.close()
+    stats["elapsed_seconds"] = round(time.perf_counter() - started, 2)
     return stats

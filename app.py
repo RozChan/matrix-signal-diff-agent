@@ -11,6 +11,7 @@ import streamlit as st
 
 from core import run_all
 from core.ai_review import run_ai_review
+from core.llm_client import get_llm_config, test_llm_connection
 from core.pipeline import OUTPUT_FILENAMES
 
 APP_ROOT = Path(__file__).resolve().parent
@@ -79,6 +80,44 @@ def main() -> None:
 
     enable_ai_review = st.checkbox("启用 AI 辅助复核", value=False)
     st.caption("AI 仅对“信号值描述/单位”等文本差异进行辅助判断，不会修改原始差异结果；所有差异仍需人工审核。")
+    llm_config = get_llm_config()
+    max_ai_review_items = st.number_input(
+        "本次最多 AI 复核条数",
+        min_value=0,
+        max_value=10000,
+        value=max(llm_config.max_review_items, 0),
+        step=1,
+    )
+    if "llm_connection_status" not in st.session_state:
+        st.session_state["llm_connection_status"] = {"status": "not_tested", "message": "未测试"}
+
+    status_map = {
+        "not_tested": "未测试",
+        "disabled": "未测试",
+        "success": "连接成功",
+        "failed": "连接失败",
+    }
+    connection_status = st.session_state["llm_connection_status"]
+    with st.expander("AI 配置状态", expanded=False):
+        st.write(f"LLM_ENABLED 当前值：{'true' if llm_config.enabled else 'false'}")
+        st.write(f"LLM_BASE_URL 是否已配置：{'已配置' if llm_config.base_url else '未配置'}")
+        st.write(f"LLM_MODEL 当前值：{llm_config.model or '未配置'}")
+        st.write(f"LLM_API_KEY 是否已配置：{'已配置' if llm_config.api_key else '未配置'}")
+        if st.button("测试大模型连接"):
+            result = test_llm_connection()
+            st.session_state["llm_connection_status"] = result
+            connection_status = result
+            if result.get("status") == "success":
+                st.success(f"连接成功：model={result.get('model')}，耗时={result.get('elapsed_seconds')} 秒")
+            elif result.get("status") == "disabled":
+                st.warning(result.get("message", "AI辅助复核未启用"))
+            else:
+                st.error(result.get("error", "连接失败"))
+        st.write(f"当前连接状态：{status_map.get(connection_status.get('status'), '未测试')}")
+        if connection_status.get("message"):
+            st.caption(connection_status["message"])
+        if connection_status.get("error"):
+            st.error(connection_status["error"])
 
     files_40 = st.file_uploader("上传 4.0 矩阵文件（支持多个 .xlsx / .xlsm）", type=["xlsx", "xlsm"], accept_multiple_files=True)
     files_51 = st.file_uploader("上传 5.1 矩阵文件（支持多个 .xlsx / .xlsm）", type=["xlsx", "xlsm"], accept_multiple_files=True)
@@ -111,8 +150,32 @@ def main() -> None:
             progress.progress(82)
 
             status.write("正在生成 AI辅助复核与人工审核明细 sheet...")
+            ai_progress = st.progress(0)
+            ai_status = st.empty()
+            ai_log = st.empty()
+
+            def update_ai_progress(payload):
+                stage = payload.get("stage", "")
+                total = int(payload.get("total") or 0)
+                current = int(payload.get("current") or 0)
+                completed = int(payload.get("completed") or 0)
+                failed = int(payload.get("failed") or 0)
+                signal_name = payload.get("signal_name") or ""
+                ai_status.write(stage)
+                if total > 0:
+                    ai_progress.progress(min(current / total, 1.0))
+                    ai_log.write(f"当前 AI 复核进度：第 {current} / {total} 条；当前信号名：{signal_name}；已完成：{completed}；已失败：{failed}")
+                elif stage:
+                    ai_log.write(stage)
+
             compare_file = pipeline_result["files"]["compare"]
-            ai_stats = run_ai_review(compare_file, enable_ai=enable_ai_review)
+            ai_stats = run_ai_review(
+                compare_file,
+                enable_ai=enable_ai_review,
+                max_ai_review_items=int(max_ai_review_items),
+                progress_callback=update_ai_progress,
+            )
+            ai_progress.progress(1.0)
             progress.progress(100)
             status.write("处理完成。")
 
@@ -132,6 +195,12 @@ def main() -> None:
                 "unknown_count": "无法判断数",
                 "not_applicable_count": "不适用数",
                 "llm_disabled_count": "AI未启用数",
+                "text_diff_count": "文本类差异数量",
+                "ai_called_count": "实际调用AI数量",
+                "ai_failed_count": "AI调用失败数量",
+                "ai_limit_skipped_count": "超过上限未复核数",
+                "max_ai_review_items": "本次最多AI复核条数",
+                "elapsed_seconds": "AI审核阶段总耗时秒",
             }
             ai_stats_df = pd.DataFrame([
                 {"指标": label, "数量": ai_stats.get(key, 0)}

@@ -1,6 +1,6 @@
 """OpenAI-compatible LLM client for optional AI review.
 
-This module never logs API keys.  Imports of optional dependencies are lazy so
+This module never logs API keys. Imports of optional dependencies are lazy so
 core modules remain importable before dependencies are installed.
 """
 
@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
+import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 
@@ -21,12 +22,18 @@ class LLMRequestError(RuntimeError):
     """Raised when an LLM request fails in a recoverable, readable way."""
 
 
+class LLMTimeoutError(LLMRequestError):
+    """Raised when an LLM request times out."""
+
+
 @dataclass(frozen=True)
 class LLMConfig:
     enabled: bool
     api_key: str
     base_url: str
     model: str
+    timeout_seconds: int
+    max_review_items: int
 
 
 def _candidate_env_files() -> list[Path]:
@@ -73,6 +80,15 @@ def _env_bool(name: str, default: str = "false") -> bool:
     return os.getenv(name, default).strip().lower() == "true"
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name, str(default)).strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
 def get_llm_config() -> LLMConfig:
     """Load LLM config from .env and system environment variables."""
 
@@ -82,6 +98,8 @@ def get_llm_config() -> LLMConfig:
         api_key=os.getenv("LLM_API_KEY", "").strip(),
         base_url=os.getenv("LLM_BASE_URL", "").strip(),
         model=os.getenv("LLM_MODEL", "").strip(),
+        timeout_seconds=_env_int("LLM_TIMEOUT_SECONDS", 30),
+        max_review_items=_env_int("LLM_MAX_REVIEW_ITEMS", 50),
     )
 
 
@@ -127,19 +145,22 @@ def _extract_json_object(text: str) -> dict[str, Any]:
     return data
 
 
-def call_chat_json(messages: list[dict[str, str]], temperature: float = 0.0, timeout: int = 60) -> dict[str, Any]:
-    """Call an OpenAI-compatible chat completions API and parse JSON content."""
+def _requests_module():
+    try:
+        import requests
+    except ModuleNotFoundError as exc:
+        raise LLMConfigurationError("缺少 requests 依赖，请先安装 requirements.txt") from exc
+    return requests
 
+
+def _post_chat_completion(messages: list[dict[str, str]], timeout: int | None = None, temperature: float = 0.0) -> dict[str, Any]:
     config = get_llm_config()
     if not config.enabled:
         raise LLMConfigurationError("LLM_ENABLED 不是 true，未调用模型")
     validate_config(config)
 
-    try:
-        import requests
-    except ModuleNotFoundError as exc:
-        raise LLMConfigurationError("缺少 requests 依赖，请先安装 requirements.txt") from exc
-
+    requests = _requests_module()
+    timeout_seconds = timeout or config.timeout_seconds
     headers = {
         "Authorization": f"Bearer {config.api_key}",
         "Content-Type": "application/json",
@@ -156,16 +177,50 @@ def call_chat_json(messages: list[dict[str, str]], temperature: float = 0.0, tim
             _chat_completions_url(config.base_url),
             headers=headers,
             json=payload,
-            timeout=timeout,
+            timeout=timeout_seconds,
         )
         response.raise_for_status()
-        body = response.json()
-        content = body["choices"][0]["message"]["content"]
+        return response.json()
+    except requests.Timeout as exc:
+        raise LLMTimeoutError("模型请求超时") from exc
     except requests.RequestException as exc:
         raise LLMRequestError(f"LLM 请求失败：{exc}") from exc
-    except (KeyError, IndexError, TypeError) as exc:
-        raise LLMRequestError(f"LLM 响应结构异常：{exc}") from exc
     except ValueError as exc:
         raise LLMRequestError(f"LLM 响应不是合法 JSON：{exc}") from exc
 
+
+def call_chat_json(messages: list[dict[str, str]], temperature: float = 0.0, timeout: int | None = None) -> dict[str, Any]:
+    """Call an OpenAI-compatible chat completions API and parse JSON content."""
+
+    try:
+        body = _post_chat_completion(messages, timeout=timeout, temperature=temperature)
+        content = body["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise LLMRequestError(f"LLM 响应结构异常：{exc}") from exc
     return _extract_json_object(str(content))
+
+
+def test_llm_connection() -> dict[str, Any]:
+    """Test the configured OpenAI-compatible chat completions endpoint."""
+
+    config = get_llm_config()
+    if not config.enabled:
+        return {"status": "disabled", "message": "AI辅助复核未启用"}
+    try:
+        validate_config(config)
+    except LLMConfigurationError as exc:
+        return {"status": "failed", "error": str(exc)}
+
+    messages = [
+        {"role": "system", "content": "你是连接测试助手。"},
+        {"role": "user", "content": '请只返回 JSON：{"ok": true}'},
+    ]
+    started = time.perf_counter()
+    try:
+        data = call_chat_json(messages, timeout=15)
+    except (LLMConfigurationError, LLMRequestError) as exc:
+        return {"status": "failed", "error": str(exc)}
+    elapsed = round(time.perf_counter() - started, 2)
+    if data.get("ok") is True:
+        return {"status": "success", "model": config.model, "elapsed_seconds": elapsed}
+    return {"status": "failed", "error": f"连接测试返回内容异常：{data}"}
