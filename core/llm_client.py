@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Any
 
@@ -28,12 +29,44 @@ class LLMConfig:
     model: str
 
 
+def _candidate_env_files() -> list[Path]:
+    repo_root = Path(__file__).resolve().parents[1]
+    cwd = Path.cwd().resolve()
+    candidates = [cwd / ".env", repo_root / ".env"]
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for path in candidates:
+        resolved = path.resolve()
+        if resolved not in seen:
+            unique.append(resolved)
+            seen.add(resolved)
+    return unique
+
+
+def _load_env_file_manually(path: Path) -> None:
+    if not path.is_file():
+        return
+    for raw_line in path.read_text(encoding="utf-8-sig", errors="ignore").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key:
+            os.environ.setdefault(key, value)
+
+
 def _load_dotenv_if_available() -> None:
     try:
         from dotenv import load_dotenv
     except ModuleNotFoundError:
+        for env_file in _candidate_env_files():
+            _load_env_file_manually(env_file)
         return
-    load_dotenv()
+
+    for env_file in _candidate_env_files():
+        load_dotenv(env_file, override=False)
 
 
 def _env_bool(name: str, default: str = "false") -> bool:

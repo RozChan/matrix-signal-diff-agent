@@ -139,7 +139,7 @@ def main() -> None:
             ])
             st.dataframe(ai_stats_df, hide_index=True, use_container_width=True)
             if enable_ai_review and ai_stats.get("llm_disabled_count", 0) > 0 and not ai_stats.get("warnings"):
-                st.warning("已勾选 AI 辅助复核，但 LLM_ENABLED 不是 true 或未启用；请检查 .env 配置。")
+                st.warning("已勾选 AI 辅助复核，但未检测到 LLM_ENABLED=true。请确认 .env 位于项目根目录、文件名不是 .env.txt、已重新启动 start_demo.bat，并已安装 python-dotenv 或使用当前版本的内置 .env 读取。")
             for warning in ai_stats.get("warnings", []):
                 st.warning(warning)
 

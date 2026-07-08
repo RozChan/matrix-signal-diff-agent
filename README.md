@@ -265,3 +265,16 @@ LLM_MODEL=<模型名称>
 11. 当前版本不接飞书、不接 Confluence。
 
 如果 `LLM_ENABLED=false` 或未配置 API key，文本类差异会写入人工审核清单，并标记为 `未启用`，原有规则分析流程不受影响。
+
+### AI 配置排查
+
+如果页面提示“已勾选 AI 辅助复核，但未检测到 `LLM_ENABLED=true`”，请检查：
+
+1. `.env` 是否放在项目根目录，也就是 `app.py` 同级目录；
+2. Windows 是否把文件实际保存成了 `.env.txt`，建议开启“显示文件扩展名”确认；
+3. `.env` 中是否写成 `LLM_ENABLED=true`，不要写成 `True` 以外的其他值，建议全部小写；
+4. 修改 `.env` 后是否重新运行了 `start_demo.bat`；
+5. 是否已经重新运行 `install_dependencies.bat` 安装 `python-dotenv`；
+6. 当前版本也包含内置 `.env` 读取兜底逻辑，即使 `python-dotenv` 缺失，也会尝试读取项目根目录 `.env`。
+
+注意：不要把真实 `LLM_API_KEY` 发到聊天、截图或提交到 Git。`.gitignore` 已忽略 `.env`，但如果 key 已经泄露，应立即到模型平台吊销并重新生成。
