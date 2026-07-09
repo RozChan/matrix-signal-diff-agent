@@ -1,4 +1,4 @@
-"""Export final human-reviewed matrix signal difference results."""
+"""Export final human-reviewed signal-level matrix difference results."""
 
 from __future__ import annotations
 
@@ -15,22 +15,23 @@ HEADERS = [
     "来源Sheet",
     "4.0信号名",
     "5.1信号名",
-    "差异字段",
-    "4.0内容",
-    "5.1内容",
+    "差异字段汇总",
+    "差异字段数量",
+    "是否包含数值类差异",
+    "是否包含文本类差异",
     "原始差异点list",
-    "AI是否复核",
-    "AI判断结果",
-    "差异类型",
+    "字段差异明细",
+    "信号级AI判断结果",
+    "差异类型汇总",
     "置信度",
-    "AI判断理由",
-    "AI建议处理方式",
-    "人工审核结果",
-    "人工备注",
-    "是否已审核",
-    "审核来源",
+    "信号级AI判断理由",
+    "信号级AI建议处理方式",
     "系统默认结论",
     "系统默认原因",
+    "人工审核结果",
+    "人工备注",
+    "审核来源",
+    "是否已审核",
     "审核时间",
 ]
 
@@ -73,30 +74,40 @@ def _source_label(source: str) -> str:
     return "待人工确认"
 
 
+def _field_details(item: dict[str, Any]) -> str:
+    if item.get("field_diff_details"):
+        return str(item["field_diff_details"])
+    blocks = []
+    for diff in item.get("field_diffs", []):
+        label = {"numeric": "数值类差异", "text": "文本类差异", "unknown": "未解析"}.get(diff.get("field_type"), "未解析")
+        blocks.append(f"【{diff.get('diff_field', '')}】\n4.0：{diff.get('value_40', '')}\n5.1：{diff.get('value_51', '')}\n类型：{label}")
+    return "\n\n".join(blocks)
+
+
 def _row_for(item: dict[str, Any], review: dict[str, Any]) -> list[Any]:
     normalized = _normalize_review(review)
     result = normalized["manual_review_result"]
-    reviewed = "是" if normalized["reviewed"] else "否"
     return [
         item.get("source_sheet", ""),
         item.get("signal_40", ""),
         item.get("signal_51", ""),
-        item.get("diff_field", ""),
-        item.get("value_40", ""),
-        item.get("value_51", ""),
+        "、".join(item.get("diff_fields", [])),
+        item.get("diff_field_count", len(item.get("field_diffs", []))),
+        "是" if item.get("has_numeric_diff") else "否",
+        "是" if item.get("has_text_diff") else "否",
         item.get("original_diff_list", ""),
-        item.get("ai_reviewed", ""),
-        item.get("ai_judgement", ""),
-        item.get("difference_type", ""),
+        _field_details(item),
+        item.get("signal_ai_judgement", ""),
+        item.get("difference_type_summary", ""),
         item.get("confidence", ""),
-        item.get("ai_reason", ""),
-        item.get("ai_suggested_action", ""),
-        result,
-        normalized["manual_note"],
-        reviewed,
-        _source_label(normalized["review_source"]),
+        item.get("signal_ai_reason", ""),
+        item.get("signal_ai_suggested_action", ""),
         normalized["default_review_result"],
         normalized["default_reason"],
+        result,
+        normalized["manual_note"],
+        _source_label(normalized["review_source"]),
+        "是" if normalized["reviewed"] else "否",
         normalized["reviewed_at"],
     ]
 
@@ -115,7 +126,7 @@ def _style_sheet(ws) -> None:
         for cell in row:
             cell.border = border
             cell.alignment = Alignment(vertical="top", wrap_text=True)
-    widths = [22, 34, 34, 16, 48, 48, 70, 12, 16, 18, 12, 52, 18, 18, 40, 12, 14, 18, 54, 24]
+    widths = [22, 34, 34, 28, 14, 16, 16, 70, 80, 18, 20, 12, 55, 20, 18, 55, 18, 40, 14, 12, 24]
     for idx, width in enumerate(widths, start=1):
         ws.column_dimensions[ws.cell(row=1, column=idx).column_letter].width = width
     ws.freeze_panes = "A2"
@@ -123,15 +134,7 @@ def _style_sheet(ws) -> None:
 
 
 def _stats_for(items: list[dict[str, Any]], state_items: dict[str, Any]) -> dict[str, int]:
-    stats = {
-        "total": len(items),
-        "confirmed_real_diff": 0,
-        "ignored": 0,
-        "typo": 0,
-        "semantic_same": 0,
-        "uncertain": 0,
-        "unreviewed": 0,
-    }
+    stats = {"total": len(items), "confirmed_real_diff": 0, "ignored": 0, "typo": 0, "semantic_same": 0, "uncertain": 0, "unreviewed": 0}
     for item in items:
         result = _normalize_review(state_items.get(item.get("item_id"), {}))["manual_review_result"]
         if result == "确认真实差异":

@@ -25,6 +25,7 @@ from core.review_store import (
     load_review_items,
     load_review_state,
     load_task_meta,
+    is_signal_level_item,
     review_badge,
     review_sort_key,
     update_review_item,
@@ -36,8 +37,8 @@ TEMP_ROOT = APP_ROOT / "temp"
 ALLOWED_EXTENSIONS = {".xlsx", ".xlsm"}
 SOURCE_FILTERS = ["全部", "完全同名匹配对比结果", "vcu-hcu 同名匹配"]
 FIELD_FILTERS = ["全部", "信号长度", "精度", "偏移量", "物理最小值", "物理最大值", "单位", "信号值描述", "未解析"]
-AI_FILTERS = ["全部", "疑似一致", "疑似错别字", "疑似语义相近", "真实差异", "无法判断", "不适用", "未启用"]
-REVIEW_SOURCE_FILTERS = ["全部", "需人工优先确认", "系统默认保留", "人工已修改"]
+AI_FILTERS = ["全部", "真实差异", "疑似可忽略", "无法判断", "未启用"]
+REVIEW_SOURCE_FILTERS = ["全部", "需人工优先确认", "系统默认保留", "人工已修改", "待人工确认"]
 MANUAL_STATUS_FILTERS = ["全部", "待人工确认", "已有结论", "人工已修改", "系统默认结论", *MANUAL_REVIEW_RESULTS]
 
 
@@ -180,7 +181,7 @@ def _show_ai_config() -> tuple[bool, int]:
     st.caption("AI 仅对“信号值描述/单位”等文本差异进行辅助判断，不会修改原始差异结果；所有差异仍需人工审核。")
     llm_config = get_llm_config()
     max_ai_review_items = st.number_input(
-        "本次最多 AI 复核条数",
+        "本次最多 AI 复核信号数",
         min_value=0,
         max_value=10000,
         value=max(llm_config.max_review_items, 0),
@@ -265,7 +266,8 @@ def _show_new_task(enable_ai_review: bool, max_ai_review_items: int) -> None:
                 ai_status.write(stage)
                 if total > 0:
                     ai_progress.progress(min(current / total, 1.0))
-                    ai_log.write(f"当前 AI 复核进度：第 {current} / {total} 条；当前信号名：{signal_name}；已完成：{completed}；已失败：{failed}")
+                    field_total = int(payload.get("field_total") or 0)
+                    ai_log.write(f"信号级 AI 复核进度：第 {current} / {total} 个信号；当前信号名：{signal_name}；已完成信号数：{completed}；已失败信号数：{failed}；涉及差异字段总数：{field_total}")
                 elif stage:
                     ai_log.write(stage)
 
@@ -287,7 +289,7 @@ def _show_new_task(enable_ai_review: bool, max_ai_review_items: int) -> None:
             st.dataframe(stats_df, hide_index=True, use_container_width=True)
             st.subheader("AI/人工审核明细统计")
             st.dataframe(pd.DataFrame([{"指标": key, "数量": value} for key, value in ai_stats.items() if key != "warnings"]), hide_index=True, use_container_width=True)
-            st.success(f"已生成 review_items.json，共 {len(review_items)} 条字段级差异。")
+            st.success(f"已生成 review_items.json，共 {len(review_items)} 条信号级差异。")
             for warning in ai_stats.get("warnings", []):
                 st.warning(warning)
             with st.expander("查看执行日志"):
@@ -315,9 +317,9 @@ def _filter_items(items: list[dict], state: dict, filters: dict[str, str]) -> li
         badge = review_badge(item, review)
         if filters["source"] != "全部" and item.get("source_sheet") != filters["source"]:
             continue
-        if filters["field"] != "全部" and item.get("diff_field") != filters["field"]:
+        if filters["field"] != "全部" and filters["field"] not in item.get("diff_fields", []):
             continue
-        if filters["ai"] != "全部" and item.get("ai_judgement") != filters["ai"]:
+        if filters["ai"] != "全部" and item.get("signal_ai_judgement") != filters["ai"]:
             continue
         if filters["review_source"] != "全部" and badge != filters["review_source"]:
             continue
@@ -344,6 +346,10 @@ def _show_review_workspace() -> None:
     review_dir = _review_dir(task_dir)
     meta = load_task_meta(task_dir)
     items = load_review_items(review_dir)
+    if items and not all(is_signal_level_item(item) for item in items):
+        st.warning("当前任务使用旧版字段级审核数据，建议重新运行任务生成信号级审核数据。")
+        _show_downloads(task_dir)
+        return
     state = init_review_state(review_dir, task_id, items)
     if not items:
         st.warning(f"当前任务 {task_id} 没有可审核数据。")
@@ -356,7 +362,7 @@ def _show_review_workspace() -> None:
 
     stats = compute_review_stats(items, state)
     labels = [
-        ("总审核项数", "total"),
+        ("信号级审核项总数", "total"),
         ("需人工优先确认", "priority_review"),
         ("系统默认保留", "system_default_keep"),
         ("人工已修改", "manual_modified"),
@@ -366,6 +372,8 @@ def _show_review_workspace() -> None:
         ("确认错别字", "typo"),
         ("确认语义一致", "semantic_same"),
         ("存疑待确认", "uncertain"),
+        ("涉及差异字段总数", "diff_field_total"),
+        ("平均每信号字段数", "avg_diff_fields_per_signal"),
     ]
     for row_start in range(0, len(labels), 5):
         cols = st.columns(5)
@@ -386,7 +394,7 @@ def _show_review_workspace() -> None:
     filtered = _filter_items(items, state, filters)
     state_items_for_sort = state.get("items", {})
     filtered = sorted(filtered, key=lambda item: review_sort_key(item, state_items_for_sort.get(item.get("item_id"), {})))
-    st.write(f"当前筛选结果：{len(filtered)} 条")
+    st.write(f"当前筛选结果：{len(filtered)} 个信号")
 
     if not filtered:
         _show_final_export(task_dir, review_dir)
@@ -404,26 +412,39 @@ def _show_review_workspace() -> None:
     for offset, item in enumerate(page_items, start=start + 1):
         item_id = item["item_id"]
         review = state_items.get(item_id, {})
-        title = f"{offset}. {item.get('signal_40') or '<空>'} ⇄ {item.get('signal_51') or '<空>'}｜{item.get('diff_field')}"
+        title = f"{offset}. {item.get('signal_40') or '<空>'} ⇄ {item.get('signal_51') or '<空>'}｜{'、'.join(item.get('diff_fields', []))}"
         preferred_item = st.session_state.get(f"expand-item-{task_id}")
         with st.expander(title, expanded=(preferred_item == item_id) or (not preferred_item and offset == start + 1)):
             left, right = st.columns(2)
-            left.markdown("**4.0 内容**")
-            left.code(item.get("value_40", "") or "<空>", language="text")
-            right.markdown("**5.1 内容**")
-            right.code(item.get("value_51", "") or "<空>", language="text")
+            left.markdown("**4.0 信号名**")
+            left.code(item.get("signal_40", "") or "<空>", language="text")
+            right.markdown("**5.1 信号名**")
+            right.code(item.get("signal_51", "") or "<空>", language="text")
             st.write(f"来源Sheet：{item.get('source_sheet', '')}")
+            st.write(f"差异字段汇总：{'、'.join(item.get('diff_fields', []))}")
+            st.write(f"差异字段数量：{item.get('diff_field_count', 0)}；包含数值类差异：{'是' if item.get('has_numeric_diff') else '否'}；包含文本类差异：{'是' if item.get('has_text_diff') else '否'}")
             badge = review_badge(item, review)
-            st.write(f"AI判断结果：{item.get('ai_judgement', '')}；差异类型：{item.get('difference_type', '')}；置信度：{item.get('confidence', '')}")
-            st.write(f"AI建议处理方式：{item.get('ai_suggested_action', '')}")
+            st.write(f"信号级AI判断结果：{item.get('signal_ai_judgement', '')}；差异类型汇总：{item.get('difference_type_summary', '')}；置信度：{item.get('confidence', '')}")
+            st.write(f"信号级AI建议处理方式：{item.get('signal_ai_suggested_action', '')}")
             st.write(f"系统默认结论：{review.get('default_review_result') or '无'}")
             st.write(f"当前最终结论：{review.get('manual_review_result') or '待人工确认'}")
             st.write(f"审核来源：{badge}")
             if badge == "系统默认保留":
-                st.success("该条已由系统默认保留为真实差异，人工可修改。")
+                st.success("🟢 系统默认保留：该信号已默认保留为真实差异，人工可修改。")
             elif badge == "需人工优先确认":
-                st.warning("AI判断该差异可能可忽略，请优先人工确认。")
-            st.info(item.get("ai_reason", "") or review.get("default_reason") or "无 AI 理由")
+                st.warning("🟠 需人工优先确认：AI认为该信号差异可能可忽略，请优先人工确认。")
+            elif badge == "人工已修改":
+                st.info("🔵 人工已修改：该条已由人工修改，最终以人工审核结果为准。")
+            else:
+                st.info("⚪ 需人工确认：AI未给出可直接采用结论，请人工确认。")
+            st.info(item.get("signal_ai_reason", "") or review.get("default_reason") or "无 AI 理由")
+            with st.expander("查看字段差异明细", expanded=False):
+                for diff in item.get("field_diffs", []):
+                    st.markdown(f"**{diff.get('diff_field', '未解析')}**")
+                    st.write(f"4.0内容：{diff.get('value_40', '')}")
+                    st.write(f"5.1内容：{diff.get('value_51', '')}")
+                    field_type = {"numeric": "数值类", "text": "文本类", "unknown": "未解析"}.get(diff.get("field_type"), "未解析")
+                    st.write(f"字段类型：{field_type}")
             with st.expander("查看原始差异点list", expanded=False):
                 st.code(item.get("original_diff_list", ""), language="text")
 
