@@ -61,7 +61,6 @@ EMPTY_STATS: dict[str, int] = {
     "llm_disabled_count": 0,
     "ai_called_count": 0,
     "ai_failed_count": 0,
-    "ai_limit_skipped_count": 0,
 }
 
 
@@ -253,15 +252,11 @@ def _ai_review(item: dict[str, Any]) -> dict[str, str]:
     }
 
 
-def get_signal_level_ai_judgement(item: dict[str, Any], enable_ai: bool, llm_enabled: bool, stats: dict[str, Any], max_ai_review_items: int) -> dict[str, str]:
+def get_signal_level_ai_judgement(item: dict[str, Any], enable_ai: bool, llm_enabled: bool, stats: dict[str, Any]) -> dict[str, str]:
     if item.get("has_numeric_diff"):
         return _system_real_diff_review(item)
     if not enable_ai or not llm_enabled:
         return _disabled_review()
-    if stats["ai_called_count"] >= max_ai_review_items:
-        stats["ai_limit_skipped_count"] += 1
-        return _unknown_review("超过本次 AI 复核信号数上限，未调用模型。")
-
     stats["ai_called_count"] += 1
     try:
         return _ai_review(item)
@@ -335,13 +330,12 @@ def _style_sheet(ws) -> None:
     ws.auto_filter.ref = ws.dimensions
 
 
-def run_ai_review(compare_file_path: Path, enable_ai: bool = False, max_ai_review_items: int = 50, progress_callback=None) -> dict[str, Any]:
+def run_ai_review(compare_file_path: Path, enable_ai: bool = False, progress_callback=None) -> dict[str, Any]:
     """Append signal-level AI辅助复核与人工审核明细 sheet to the compare workbook."""
 
     compare_path = Path(compare_file_path)
     started = time.perf_counter()
-    max_ai_review_items = max(0, int(max_ai_review_items))
-    stats: dict[str, Any] = {**EMPTY_STATS, "warnings": [], "max_ai_review_items": max_ai_review_items}
+    stats: dict[str, Any] = {**EMPTY_STATS, "warnings": []}
     config = get_llm_config()
     llm_enabled = config.enabled
 
@@ -361,7 +355,7 @@ def run_ai_review(compare_file_path: Path, enable_ai: bool = False, max_ai_revie
     if not enable_ai or not llm_enabled:
         emit(stage="AI 未启用，仅生成信号级人工审核清单", total=total_signals, field_total=total_fields)
     else:
-        emit(stage="正在执行信号级 AI 复核", total=total_signals, field_total=total_fields, max_ai_review_items=max_ai_review_items)
+        emit(stage="正在执行信号级 AI 复核", total=total_signals, field_total=total_fields)
 
     ws = wb.create_sheet(AI_REVIEW_SHEET)
     ws.append(REVIEW_HEADERS)
@@ -377,7 +371,7 @@ def run_ai_review(compare_file_path: Path, enable_ai: bool = False, max_ai_revie
             completed=completed,
             failed=stats["ai_failed_count"],
         )
-        review = get_signal_level_ai_judgement(item, enable_ai, llm_enabled, stats, max_ai_review_items)
+        review = get_signal_level_ai_judgement(item, enable_ai, llm_enabled, stats)
         _stats_increment(stats, item, review)
         completed += 1
         default_result, default_reason, priority = _default_review_result(review)
