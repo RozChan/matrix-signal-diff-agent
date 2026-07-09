@@ -15,6 +15,11 @@ REVIEW_LOG_FILE = "review_log.jsonl"
 TASK_META_FILE = "task_meta.json"
 
 MANUAL_REVIEW_RESULTS = ["确认真实差异", "确认可忽略", "确认错别字", "确认语义一致", "存疑待确认"]
+NUMERIC_DIFF_FIELDS = {"信号长度", "精度", "偏移量", "物理最小值", "物理最大值"}
+PRIORITY_AI_JUDGEMENTS = {"疑似一致", "疑似错别字", "疑似语义相近"}
+UNCERTAIN_AI_JUDGEMENTS = {"无法判断", "未启用", ""}
+SYSTEM_DEFAULT_SOURCE = "system_default"
+MANUAL_SOURCE = "manual"
 
 ITEM_HEADER_MAP = {
     "来源Sheet": "source_sheet",
@@ -124,6 +129,51 @@ def build_item_id(item: dict[str, Any]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
 
+def is_priority_review_item(item: dict[str, Any]) -> bool:
+    return item.get("ai_judgement", "") in PRIORITY_AI_JUDGEMENTS or item.get("ai_suggested_action", "") == "可忽略"
+
+
+def is_system_default_keep_state(review: dict[str, Any]) -> bool:
+    return review.get("review_source") == SYSTEM_DEFAULT_SOURCE and review.get("manual_review_result") == "确认真实差异"
+
+
+def get_default_review_state(item: dict[str, Any]) -> dict[str, Any]:
+    ai_judgement = str(item.get("ai_judgement") or "").strip()
+    ai_action = str(item.get("ai_suggested_action") or "").strip()
+    diff_field = str(item.get("diff_field") or "").strip()
+    now = utc_now_iso()
+
+    if ai_judgement == "真实差异" or ai_action == "应保留差异" or diff_field in NUMERIC_DIFF_FIELDS:
+        return {
+            "manual_review_result": "确认真实差异",
+            "manual_note": "",
+            "reviewed": True,
+            "review_source": SYSTEM_DEFAULT_SOURCE,
+            "default_review_result": "确认真实差异",
+            "default_reason": "AI或规则判断为真实差异，系统默认保留；人工可修改",
+            "reviewed_at": now,
+            "updated_at": now,
+            "reviewer": "",
+        }
+
+    if ai_judgement in PRIORITY_AI_JUDGEMENTS or ai_action == "可忽略":
+        reason = "AI判断该差异疑似可忽略或可合并，需人工优先确认"
+    else:
+        reason = "AI无法给出可靠结论，需人工确认"
+
+    return {
+        "manual_review_result": "",
+        "manual_note": "",
+        "reviewed": False,
+        "review_source": "",
+        "default_review_result": "",
+        "default_reason": reason,
+        "reviewed_at": "",
+        "updated_at": now,
+        "reviewer": "",
+    }
+
+
 def _header_map(ws) -> dict[str, int]:
     return {str(cell.value).strip(): idx for idx, cell in enumerate(ws[1], start=1) if cell.value is not None}
 
@@ -169,14 +219,71 @@ def load_review_items(review_dir: Path) -> list[dict[str, Any]]:
     return _read_json(_review_items_path(Path(review_dir)), [])
 
 
-def init_review_state(review_dir: Path, task_id: str) -> dict[str, Any]:
-    state = {"task_id": task_id, "updated_at": utc_now_iso(), "items": {}}
-    save_review_state(review_dir, state)
+def _normalize_review_entry(entry: dict[str, Any], item: dict[str, Any] | None = None) -> dict[str, Any]:
+    normalized = dict(entry) if isinstance(entry, dict) else {}
+    default = get_default_review_state(item or {})
+    result = str(normalized.get("manual_review_result") or "").strip()
+    source = str(normalized.get("review_source") or "").strip()
+
+    if not source:
+        # Old states had no review_source. Preserve filled results as manual to avoid overwriting user work.
+        source = MANUAL_SOURCE if result else ""
+    normalized["review_source"] = source
+
+    normalized.setdefault("manual_review_result", result)
+    normalized.setdefault("manual_note", "")
+    normalized.setdefault("default_review_result", default.get("default_review_result", ""))
+    normalized.setdefault("default_reason", default.get("default_reason", ""))
+    normalized.setdefault("reviewed_at", "")
+    normalized.setdefault("updated_at", normalized.get("reviewed_at") or utc_now_iso())
+    normalized.setdefault("reviewer", "")
+    if "reviewed" not in normalized:
+        normalized["reviewed"] = bool(result)
+    return normalized
+
+
+def init_review_state(review_dir: Path, task_id: str, items: list[dict[str, Any]] | None = None, overwrite: bool = False) -> dict[str, Any]:
+    review_path = Path(review_dir)
+    item_list = items if items is not None else load_review_items(review_path)
+    existing = load_review_state(review_path) if _review_state_path(review_path).exists() and not overwrite else {"items": {}}
+    state = {
+        "task_id": existing.get("task_id") or task_id,
+        "updated_at": existing.get("updated_at") or utc_now_iso(),
+        "items": dict(existing.get("items", {})),
+    }
+
+    changed = overwrite or not _review_state_path(review_path).exists()
+    for item in item_list:
+        item_id = item.get("item_id")
+        if not item_id:
+            continue
+        current = state["items"].get(item_id)
+        if current is None or overwrite:
+            state["items"][item_id] = get_default_review_state(item)
+            changed = True
+        else:
+            normalized = _normalize_review_entry(current, item)
+            # Previous versions initialized empty per-item state. Apply safe system defaults
+            # only when the record has not been manually edited and has no final result.
+            if normalized.get("review_source") != MANUAL_SOURCE and not normalized.get("manual_review_result"):
+                default_state = get_default_review_state(item)
+                if default_state.get("manual_review_result"):
+                    normalized = default_state
+            if normalized != current:
+                state["items"][item_id] = normalized
+                changed = True
+    if changed:
+        save_review_state(review_path, state)
     return state
 
 
 def load_review_state(review_dir: Path) -> dict[str, Any]:
-    return _read_json(_review_state_path(Path(review_dir)), {"task_id": "", "updated_at": "", "items": {}})
+    state = _read_json(_review_state_path(Path(review_dir)), {"task_id": "", "updated_at": "", "items": {}})
+    state.setdefault("task_id", "")
+    state.setdefault("updated_at", "")
+    state.setdefault("items", {})
+    state["items"] = {item_id: _normalize_review_entry(entry) for item_id, entry in state.get("items", {}).items()}
+    return state
 
 
 def save_review_state(review_dir: Path, state: dict[str, Any]) -> None:
@@ -207,12 +314,18 @@ def update_review_item(
     state = load_review_state(review_dir)
     if not state.get("task_id"):
         state["task_id"] = task_id
-    reviewed = bool(manual_review_result)
-    state.setdefault("items", {})[item_id] = {
+    previous = state.setdefault("items", {}).get(item_id, {})
+    previous = _normalize_review_entry(previous)
+    now = utc_now_iso()
+    state["items"][item_id] = {
         "manual_review_result": manual_review_result,
         "manual_note": manual_note,
-        "reviewed": reviewed,
-        "reviewed_at": utc_now_iso() if reviewed else "",
+        "reviewed": True,
+        "review_source": MANUAL_SOURCE,
+        "default_review_result": previous.get("default_review_result", ""),
+        "default_reason": previous.get("default_reason", ""),
+        "reviewed_at": now,
+        "updated_at": now,
         "reviewer": reviewer,
     }
     save_review_state(review_dir, state)
@@ -232,12 +345,41 @@ def update_review_item(
     return state
 
 
+def review_badge(item: dict[str, Any], review: dict[str, Any]) -> str:
+    if review.get("review_source") == MANUAL_SOURCE:
+        return "人工已修改"
+    if is_system_default_keep_state(review):
+        return "系统默认保留"
+    if is_priority_review_item(item):
+        return "需人工优先确认"
+    return "待人工确认"
+
+
+def review_sort_key(item: dict[str, Any], review: dict[str, Any]) -> tuple[int, str, str, str]:
+    source = review.get("review_source", "")
+    result = review.get("manual_review_result", "")
+    ai = item.get("ai_judgement", "")
+    if source != MANUAL_SOURCE and is_priority_review_item(item):
+        priority = 0
+    elif ai in UNCERTAIN_AI_JUDGEMENTS or not result:
+        priority = 1
+    elif source == MANUAL_SOURCE:
+        priority = 2
+    elif source == SYSTEM_DEFAULT_SOURCE and result == "确认真实差异":
+        priority = 3
+    else:
+        priority = 4
+    return (priority, item.get("source_sheet", ""), item.get("signal_40", ""), item.get("diff_field", ""))
+
+
 def compute_review_stats(items: list[dict[str, Any]], state: dict[str, Any]) -> dict[str, int | str]:
     state_items = state.get("items", {}) if isinstance(state, dict) else {}
     stats: dict[str, int | str] = {
         "total": len(items),
-        "reviewed": 0,
-        "unreviewed": 0,
+        "priority_review": 0,
+        "system_default_keep": 0,
+        "manual_modified": 0,
+        "pending_manual": 0,
         "confirmed_real_diff": 0,
         "ignored": 0,
         "typo": 0,
@@ -246,12 +388,18 @@ def compute_review_stats(items: list[dict[str, Any]], state: dict[str, Any]) -> 
         "updated_at": state.get("updated_at", "") if isinstance(state, dict) else "",
     }
     for item in items:
-        review = state_items.get(item.get("item_id"), {})
+        review = _normalize_review_entry(state_items.get(item.get("item_id"), {}), item)
         result = review.get("manual_review_result", "")
-        if result:
-            stats["reviewed"] = int(stats["reviewed"]) + 1
-        else:
-            stats["unreviewed"] = int(stats["unreviewed"]) + 1
+        source = review.get("review_source", "")
+        if source != MANUAL_SOURCE and is_priority_review_item(item):
+            stats["priority_review"] = int(stats["priority_review"]) + 1
+        if is_system_default_keep_state(review):
+            stats["system_default_keep"] = int(stats["system_default_keep"]) + 1
+        if source == MANUAL_SOURCE:
+            stats["manual_modified"] = int(stats["manual_modified"]) + 1
+        if not review.get("reviewed"):
+            stats["pending_manual"] = int(stats["pending_manual"]) + 1
+
         if result == "确认真实差异":
             stats["confirmed_real_diff"] = int(stats["confirmed_real_diff"]) + 1
         elif result == "确认可忽略":

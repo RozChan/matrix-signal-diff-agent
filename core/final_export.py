@@ -28,6 +28,9 @@ HEADERS = [
     "人工审核结果",
     "人工备注",
     "是否已审核",
+    "审核来源",
+    "系统默认结论",
+    "系统默认原因",
     "审核时间",
 ]
 
@@ -46,9 +49,34 @@ def _load_json(path: Path) -> Any:
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
+def _normalize_review(review: dict[str, Any]) -> dict[str, Any]:
+    result = review.get("manual_review_result", "") if isinstance(review, dict) else ""
+    source = review.get("review_source", "") if isinstance(review, dict) else ""
+    if not source and result:
+        source = "manual"
+    return {
+        "manual_review_result": result,
+        "manual_note": review.get("manual_note", "") if isinstance(review, dict) else "",
+        "reviewed": review.get("reviewed", bool(result)) if isinstance(review, dict) else bool(result),
+        "review_source": source,
+        "default_review_result": review.get("default_review_result", "") if isinstance(review, dict) else "",
+        "default_reason": review.get("default_reason", "") if isinstance(review, dict) else "",
+        "reviewed_at": review.get("reviewed_at", "") if isinstance(review, dict) else "",
+    }
+
+
+def _source_label(source: str) -> str:
+    if source == "system_default":
+        return "系统默认"
+    if source == "manual":
+        return "人工修改"
+    return "待人工确认"
+
+
 def _row_for(item: dict[str, Any], review: dict[str, Any]) -> list[Any]:
-    result = review.get("manual_review_result", "")
-    reviewed = "是" if result else "否"
+    normalized = _normalize_review(review)
+    result = normalized["manual_review_result"]
+    reviewed = "是" if normalized["reviewed"] else "否"
     return [
         item.get("source_sheet", ""),
         item.get("signal_40", ""),
@@ -64,9 +92,12 @@ def _row_for(item: dict[str, Any], review: dict[str, Any]) -> list[Any]:
         item.get("ai_reason", ""),
         item.get("ai_suggested_action", ""),
         result,
-        review.get("manual_note", ""),
+        normalized["manual_note"],
         reviewed,
-        review.get("reviewed_at", ""),
+        _source_label(normalized["review_source"]),
+        normalized["default_review_result"],
+        normalized["default_reason"],
+        normalized["reviewed_at"],
     ]
 
 
@@ -84,7 +115,7 @@ def _style_sheet(ws) -> None:
         for cell in row:
             cell.border = border
             cell.alignment = Alignment(vertical="top", wrap_text=True)
-    widths = [22, 34, 34, 16, 48, 48, 70, 12, 16, 18, 12, 52, 18, 18, 40, 12, 24]
+    widths = [22, 34, 34, 16, 48, 48, 70, 12, 16, 18, 12, 52, 18, 18, 40, 12, 14, 18, 54, 24]
     for idx, width in enumerate(widths, start=1):
         ws.column_dimensions[ws.cell(row=1, column=idx).column_letter].width = width
     ws.freeze_panes = "A2"
@@ -102,7 +133,7 @@ def _stats_for(items: list[dict[str, Any]], state_items: dict[str, Any]) -> dict
         "unreviewed": 0,
     }
     for item in items:
-        result = state_items.get(item.get("item_id"), {}).get("manual_review_result", "")
+        result = _normalize_review(state_items.get(item.get("item_id"), {}))["manual_review_result"]
         if result == "确认真实差异":
             stats["confirmed_real_diff"] += 1
         elif result == "确认可忽略":
@@ -127,7 +158,7 @@ def export_final_review_result(review_items_path: Path, review_state_path: Path,
     default = wb.active
     wb.remove(default)
 
-    all_rows = [(item, state_items.get(item.get("item_id"), {})) for item in items]
+    all_rows = [(item, _normalize_review(state_items.get(item.get("item_id"), {}))) for item in items]
     for sheet_name, result_filter in SHEET_RULES:
         ws = wb.create_sheet(sheet_name)
         ws.append(HEADERS)

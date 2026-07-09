@@ -25,6 +25,8 @@ from core.review_store import (
     load_review_items,
     load_review_state,
     load_task_meta,
+    review_badge,
+    review_sort_key,
     update_review_item,
     update_task_meta,
 )
@@ -35,7 +37,8 @@ ALLOWED_EXTENSIONS = {".xlsx", ".xlsm"}
 SOURCE_FILTERS = ["全部", "完全同名匹配对比结果", "vcu-hcu 同名匹配"]
 FIELD_FILTERS = ["全部", "信号长度", "精度", "偏移量", "物理最小值", "物理最大值", "单位", "信号值描述", "未解析"]
 AI_FILTERS = ["全部", "疑似一致", "疑似错别字", "疑似语义相近", "真实差异", "无法判断", "不适用", "未启用"]
-MANUAL_STATUS_FILTERS = ["全部", "未审核", "已审核", *MANUAL_REVIEW_RESULTS]
+REVIEW_SOURCE_FILTERS = ["全部", "需人工优先确认", "系统默认保留", "人工已修改"]
+MANUAL_STATUS_FILTERS = ["全部", "待人工确认", "已有结论", "人工已修改", "系统默认结论", *MANUAL_REVIEW_RESULTS]
 
 
 def _safe_filename(name: str) -> str:
@@ -273,7 +276,7 @@ def _show_new_task(enable_ai_review: bool, max_ai_review_items: int) -> None:
 
             status.write("正在生成网页端人工审核数据...")
             review_items = generate_review_items_from_excel(compare_file, review_dir)
-            init_review_state(review_dir, task_id)
+            init_review_state(review_dir, task_id, review_items)
             update_task_meta(task_dir, status="reviewing")
             progress.progress(100)
             status.write("处理完成，已进入人工审核工作台。")
@@ -308,16 +311,24 @@ def _filter_items(items: list[dict], state: dict, filters: dict[str, str]) -> li
     for item in items:
         review = state_items.get(item.get("item_id"), {})
         result = review.get("manual_review_result", "")
+        source = review.get("review_source", "")
+        badge = review_badge(item, review)
         if filters["source"] != "全部" and item.get("source_sheet") != filters["source"]:
             continue
         if filters["field"] != "全部" and item.get("diff_field") != filters["field"]:
             continue
         if filters["ai"] != "全部" and item.get("ai_judgement") != filters["ai"]:
             continue
-        manual = filters["manual"]
-        if manual == "未审核" and result:
+        if filters["review_source"] != "全部" and badge != filters["review_source"]:
             continue
-        if manual == "已审核" and not result:
+        manual = filters["manual"]
+        if manual == "待人工确认" and review.get("reviewed"):
+            continue
+        if manual == "已有结论" and not result:
+            continue
+        if manual == "人工已修改" and source != "manual":
+            continue
+        if manual == "系统默认结论" and source != "system_default":
             continue
         if manual in MANUAL_REVIEW_RESULTS and result != manual:
             continue
@@ -333,7 +344,7 @@ def _show_review_workspace() -> None:
     review_dir = _review_dir(task_dir)
     meta = load_task_meta(task_dir)
     items = load_review_items(review_dir)
-    state = load_review_state(review_dir)
+    state = init_review_state(review_dir, task_id, items)
     if not items:
         st.warning(f"当前任务 {task_id} 没有可审核数据。")
         return
@@ -344,30 +355,37 @@ def _show_review_workspace() -> None:
         st.caption(f"任务状态：{meta.get('status', '')}；创建时间：{meta.get('created_at', '')}")
 
     stats = compute_review_stats(items, state)
-    cols = st.columns(8)
     labels = [
         ("总审核项数", "total"),
-        ("已审核数", "reviewed"),
-        ("未审核数", "unreviewed"),
-        ("确认真实差异", "confirmed_real_diff"),
+        ("需人工优先确认", "priority_review"),
+        ("系统默认保留", "system_default_keep"),
+        ("人工已修改", "manual_modified"),
+        ("待人工确认", "pending_manual"),
+        ("最终保留差异", "confirmed_real_diff"),
         ("确认可忽略", "ignored"),
         ("确认错别字", "typo"),
         ("确认语义一致", "semantic_same"),
         ("存疑待确认", "uncertain"),
     ]
-    for col, (label, key) in zip(cols, labels):
-        col.metric(label, stats.get(key, 0))
+    for row_start in range(0, len(labels), 5):
+        cols = st.columns(5)
+        for col, (label, key) in zip(cols, labels[row_start : row_start + 5]):
+            col.metric(label, stats.get(key, 0))
     st.caption(f"最后保存时间：{stats.get('updated_at') or '尚未保存人工审核'}")
 
     st.subheader("筛选")
     c1, c2, c3, c4 = st.columns(4)
+    c5, _, _, _ = st.columns(4)
     filters = {
         "source": c1.selectbox("来源Sheet", SOURCE_FILTERS),
         "field": c2.selectbox("差异字段", FIELD_FILTERS),
         "ai": c3.selectbox("AI判断结果", AI_FILTERS),
-        "manual": c4.selectbox("人工审核状态", MANUAL_STATUS_FILTERS),
+        "review_source": c4.selectbox("审核来源", REVIEW_SOURCE_FILTERS),
+        "manual": c5.selectbox("人工审核状态", MANUAL_STATUS_FILTERS),
     }
     filtered = _filter_items(items, state, filters)
+    state_items_for_sort = state.get("items", {})
+    filtered = sorted(filtered, key=lambda item: review_sort_key(item, state_items_for_sort.get(item.get("item_id"), {})))
     st.write(f"当前筛选结果：{len(filtered)} 条")
 
     if not filtered:
@@ -395,9 +413,17 @@ def _show_review_workspace() -> None:
             right.markdown("**5.1 内容**")
             right.code(item.get("value_51", "") or "<空>", language="text")
             st.write(f"来源Sheet：{item.get('source_sheet', '')}")
+            badge = review_badge(item, review)
             st.write(f"AI判断结果：{item.get('ai_judgement', '')}；差异类型：{item.get('difference_type', '')}；置信度：{item.get('confidence', '')}")
             st.write(f"AI建议处理方式：{item.get('ai_suggested_action', '')}")
-            st.info(item.get("ai_reason", "") or "无 AI 理由")
+            st.write(f"系统默认结论：{review.get('default_review_result') or '无'}")
+            st.write(f"当前最终结论：{review.get('manual_review_result') or '待人工确认'}")
+            st.write(f"审核来源：{badge}")
+            if badge == "系统默认保留":
+                st.success("该条已由系统默认保留为真实差异，人工可修改。")
+            elif badge == "需人工优先确认":
+                st.warning("AI判断该差异可能可忽略，请优先人工确认。")
+            st.info(item.get("ai_reason", "") or review.get("default_reason") or "无 AI 理由")
             with st.expander("查看原始差异点list", expanded=False):
                 st.code(item.get("original_diff_list", ""), language="text")
 
@@ -428,7 +454,7 @@ def _show_review_workspace() -> None:
 
 def _show_batch_actions(task_dir: Path, review_dir: Path, task_id: str, filtered: list[dict], state: dict) -> None:
     with st.expander("批量操作（可选，谨慎使用）", expanded=False):
-        st.warning("批量操作只会作用于当前筛选结果中的未审核记录，请勾选确认后再执行。")
+        st.warning("批量操作只会作用于当前筛选结果中的“需人工优先确认”且未审核记录，不会批量改动系统默认保留的真实差异。")
         result = st.selectbox("批量设置结果", ["确认可忽略", "存疑待确认"], key=f"batch-result-{task_id}")
         confirm = st.checkbox("我确认要批量更新当前筛选结果中的未审核记录", key=f"batch-confirm-{task_id}")
         if st.button("执行批量更新", disabled=not confirm, key=f"batch-apply-{task_id}"):
@@ -436,7 +462,8 @@ def _show_batch_actions(task_dir: Path, review_dir: Path, task_id: str, filtered
             count = 0
             for item in filtered:
                 item_id = item["item_id"]
-                if state_items.get(item_id, {}).get("manual_review_result"):
+                review = state_items.get(item_id, {})
+                if review.get("reviewed") or review_badge(item, review) != "需人工优先确认":
                     continue
                 update_review_item(review_dir, task_id, item_id, result, "批量操作生成")
                 count += 1
