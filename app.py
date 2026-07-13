@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import os
 import secrets
 import traceback
 import zipfile
@@ -10,6 +11,13 @@ from typing import Iterable
 
 import pandas as pd
 import streamlit as st
+
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except Exception:  # noqa: BLE001
+    pass
 
 from core import run_all
 from core.ai_review import run_ai_review
@@ -34,7 +42,7 @@ from core.review_store import (
 )
 
 APP_ROOT = Path(__file__).resolve().parent
-TEMP_ROOT = APP_ROOT / "temp"
+TEMP_ROOT = Path(os.getenv("TASK_ROOT_DIR", str(APP_ROOT / "temp"))).expanduser().resolve()
 ALLOWED_EXTENSIONS = {".xlsx", ".xlsm"}
 SOURCE_FILTERS = ["全部", "完全同名匹配对比结果", "vcu-hcu 同名匹配"]
 FIELD_FILTERS = ["全部", "信号长度", "精度", "偏移量", "物理最小值", "物理最大值", "单位", "信号值描述", "未解析"]
@@ -125,6 +133,9 @@ def _zip_outputs(task_dir: Path, zip_path: Path) -> Path:
             (review_dir / "review_items.json", "review/review_items.json"),
             (review_dir / "review_state.json", "review/review_state.json"),
             (review_dir / "review_log.jsonl", "review/review_log.jsonl"),
+            (task_dir / "bot" / "received_files.json", "bot/received_files.json"),
+            (task_dir / "bot" / "bot_events.jsonl", "bot/bot_events.jsonl"),
+            (task_dir / "bot" / "delivery_state.json", "bot/delivery_state.json"),
         ]:
             if path.exists():
                 zf.write(path, arcname=arcname)
@@ -187,7 +198,9 @@ def _restore_task(task_id: str) -> None:
     st.success(f"已恢复任务：{task_id}")
 
 
-def _show_history_loader() -> None:
+def _show_history_loader(hide_history: bool = False) -> None:
+    if hide_history:
+        return
     with st.sidebar:
         st.header("继续历史任务")
         tasks = _scan_tasks()
@@ -262,7 +275,7 @@ def _show_new_task(enable_ai_review: bool) -> None:
             status.write("已创建临时任务目录，正在保存上传文件...")
             saved_40 = _save_uploads(files_40, input_40_dir)
             saved_51 = _save_uploads(files_51, input_51_dir)
-            update_task_meta(task_dir, input_40_count=len(saved_40), input_51_count=len(saved_51), status="running")
+            update_task_meta(task_dir, source="local", input_40_count=len(saved_40), input_51_count=len(saved_51), status="running")
             progress.progress(15)
             st.success(f"已保存上传文件：4.0={len(saved_40)} 个，5.1={len(saved_51)} 个。task_id：{task_id}")
 
@@ -520,9 +533,13 @@ def _show_batch_actions(task_dir: Path, review_dir: Path, task_id: str, filtered
 def _show_final_export(task_dir: Path, review_dir: Path) -> None:
     st.subheader("生成最终结果")
     final_path = _output_dir(task_dir) / FINAL_REVIEW_FILENAME
-    if st.button("生成最终审核结果", type="primary", key=f"export-final-{task_dir.name}"):
+    if st.button("完成审核并生成最终结果", type="primary", key=f"export-final-{task_dir.name}"):
         stats = export_final_review_result(review_dir / "review_items.json", review_dir / "review_state.json", final_path)
-        update_task_meta(task_dir, status="final_exported")
+        meta = load_task_meta(task_dir)
+        updates = {"status": "final_exported"}
+        if meta.get("source") == "feishu":
+            updates["result_delivery_status"] = "pending"
+        update_task_meta(task_dir, **updates)
         st.success(f"已生成：{final_path}")
         st.dataframe(pd.DataFrame([{"指标": k, "数量": v} for k, v in stats.items()]), hide_index=True, use_container_width=True)
     if final_path.exists():
@@ -533,9 +550,21 @@ def main() -> None:
     st.set_page_config(page_title="EEA 4.0/5.1 矩阵同一信号差异识别工具", layout="wide")
     st.title("EEA 4.0/5.1 矩阵同一信号差异识别工具")
     st.caption("本地 Streamlit Demo：封装 legacy 脚本流程；AI 复核仅作为人工审核参考，最终以人工审核结果为准。")
-    _show_history_loader()
-    enable_ai_review = _show_ai_config()
-    _show_new_task(enable_ai_review)
+    query_task_id = st.query_params.get("task_id", "")
+    query_token = st.query_params.get("token", "")
+    feishu_link_mode = bool(query_task_id or query_token)
+    if feishu_link_mode:
+        task_dir = _task_dir(str(query_task_id))
+        meta = load_task_meta(task_dir)
+        if not meta or not query_token or meta.get("review_token") != query_token:
+            st.error("无权访问或审核链接无效。")
+            return
+        st.session_state["current_task_id"] = str(query_task_id)
+        st.success("飞书审核链接校验通过，已自动加载任务。")
+    _show_history_loader(hide_history=feishu_link_mode)
+    if not feishu_link_mode:
+        enable_ai_review = _show_ai_config()
+        _show_new_task(enable_ai_review)
     _show_review_workspace()
 
 

@@ -255,6 +255,8 @@ def _ai_review(item: dict[str, Any]) -> dict[str, str]:
 def get_signal_level_ai_judgement(item: dict[str, Any], enable_ai: bool, llm_enabled: bool, stats: dict[str, Any]) -> dict[str, str]:
     if item.get("has_numeric_diff"):
         return _system_real_diff_review(item)
+    if not item.get("has_text_diff"):
+        return _unknown_review("差异字段未解析或不属于可复核文本字段，需人工确认。")
     if not enable_ai or not llm_enabled:
         return _disabled_review()
     stats["ai_called_count"] += 1
@@ -352,27 +354,47 @@ def run_ai_review(compare_file_path: Path, enable_ai: bool = False, progress_cal
     signal_items = _iter_signal_items(wb)
     total_signals = len(signal_items)
     total_fields = sum(int(item.get("diff_field_count") or 0) for item in signal_items)
+    ai_required_signals = sum(1 for item in signal_items if not item.get("has_numeric_diff") and item.get("has_text_diff"))
+    system_direct_signals = total_signals - ai_required_signals
     if not enable_ai or not llm_enabled:
-        emit(stage="AI 未启用，仅生成信号级人工审核清单", total=total_signals, field_total=total_fields)
+        emit(
+            stage="AI 未启用，仅生成信号级人工审核清单",
+            total=total_signals,
+            field_total=total_fields,
+            ai_required_total=0,
+            system_direct_total=system_direct_signals,
+        )
     else:
-        emit(stage="正在执行信号级 AI 复核", total=total_signals, field_total=total_fields)
+        emit(
+            stage="正在执行信号级 AI 复核",
+            total=total_signals,
+            field_total=total_fields,
+            ai_required_total=ai_required_signals,
+            system_direct_total=system_direct_signals,
+        )
 
     ws = wb.create_sheet(AI_REVIEW_SHEET)
     ws.append(REVIEW_HEADERS)
 
     completed = 0
+    ai_completed = 0
     for index, item in enumerate(signal_items, start=1):
         emit(
             stage="正在执行信号级 AI 复核" if enable_ai and llm_enabled else "AI 未启用，仅生成信号级人工审核清单",
             current=index,
             total=total_signals,
             field_total=total_fields,
+            ai_required_total=ai_required_signals if enable_ai and llm_enabled else 0,
+            system_direct_total=system_direct_signals,
             signal_name=item.get("signal_40") or item.get("signal_51") or "",
             completed=completed,
+            ai_completed=ai_completed,
             failed=stats["ai_failed_count"],
         )
         review = get_signal_level_ai_judgement(item, enable_ai, llm_enabled, stats)
         _stats_increment(stats, item, review)
+        if review.get("ai_reviewed") == "是" or (enable_ai and llm_enabled and not item.get("has_numeric_diff") and item.get("has_text_diff")):
+            ai_completed += 1
         completed += 1
         default_result, default_reason, priority = _default_review_result(review)
         ws.append([
@@ -397,7 +419,16 @@ def run_ai_review(compare_file_path: Path, enable_ai: bool = False, progress_cal
             "",
         ])
 
-    emit(stage="正在写入 Excel", total=total_signals, field_total=total_fields, completed=completed, failed=stats["ai_failed_count"])
+    emit(
+        stage="正在写入 Excel",
+        total=total_signals,
+        field_total=total_fields,
+        ai_required_total=ai_required_signals if enable_ai and llm_enabled else 0,
+        system_direct_total=system_direct_signals,
+        completed=completed,
+        ai_completed=ai_completed,
+        failed=stats["ai_failed_count"],
+    )
     _style_sheet(ws)
     wb.save(compare_path)
     wb.close()

@@ -6,3 +6,4 @@ output/
 temp/*
 !temp/.gitkeep
 .env
+shilibot.py

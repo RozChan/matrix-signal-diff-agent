@@ -539,3 +539,178 @@ output/人工审核后最终差异结果.xlsx
 - 🔵 蓝色：`人工已修改`。
 
 每个信号卡片里的“字段差异明细”默认展开，审核人员可以直接看到该信号下所有字段差异，不需要逐条手动展开。
+
+## 飞书机器人入口（新增，保留本地模式）
+
+当前版本在不替换本地 Streamlit 使用方式的前提下，新增了一个飞书机器人入口。原有 `start_demo.bat` 和 `http://localhost:8501` 仍然用于本机上传、调试、历史任务恢复、人工审核和下载结果。
+
+### shilibot.py 的处理方式
+
+根目录 `shilibot.py` 是本地参考文件，包含真实本机路径、人员 open_id、飞书文档 token 和内部 URL，因此已加入 `.gitignore`，不再作为正式代码提交。仓库中新增了脱敏参考文件：
+
+- `examples/shilibot_reference_sanitized.py`
+
+该脱敏示例只保留 `lark-cli` 技术结构：`run_cli()`、`event consume im.message.receive_v1`、线程处理消息、回复消息、主动发送消息和消息资源下载模式。
+
+### 运行模式
+
+#### 1. 本地调试模式
+
+```bat
+start_demo.bat
+```
+
+默认访问：
+
+```text
+http://localhost:8501
+```
+
+适用于不接飞书时的本地上传、人工审核、历史任务恢复和结果下载。
+
+#### 2. 内网审核服务模式
+
+```bat
+start_server.bat
+```
+
+等价于：
+
+```bash
+streamlit run app.py --server.address 0.0.0.0 --server.port 8501
+```
+
+飞书机器人发送给用户的审核链接由环境变量 `REVIEW_BASE_URL` 生成，例如：
+
+```env
+REVIEW_BASE_URL=http://工作站内网IP:8501
+```
+
+代码不会写死 localhost 或内网 IP。
+
+#### 3. 飞书机器人模式
+
+```bat
+start_bot.bat
+```
+
+启动前需要配置：
+
+```env
+FEISHU_BOT_ENABLED=true
+LARK_CLI_PATH=C:\path\to\lark-cli.exe
+REVIEW_BASE_URL=http://工作站内网IP:8501
+```
+
+如果缺少 `FEISHU_BOT_ENABLED=true` 或 `LARK_CLI_PATH`，脚本会用中文提示并退出，不会静默失败。
+
+也可以使用：
+
+```bat
+start_all.bat
+```
+
+同时拉起内网 Streamlit 服务和飞书机器人窗口。
+
+### 环境变量
+
+`.env.example` 新增了飞书入口相关配置：
+
+```env
+LARK_CLI_PATH=
+FEISHU_BOT_ENABLED=false
+REVIEW_BASE_URL=http://localhost:8501
+TASK_ROOT_DIR=temp
+BOT_PROGRESS_MIN_INTERVAL_SECONDS=15
+BOT_MAX_FILE_SIZE_MB=100
+BOT_MAX_TASK_SIZE_MB=1000
+BOT_ALLOWED_EXTENSIONS=.xlsx,.xlsm,.zip
+```
+
+默认 `FEISHU_BOT_ENABLED=false`，因此本地模式不会接飞书。
+
+### 飞书用户操作流程
+
+第一版采用明确指令，避免文件归属混乱：
+
+1. 用户私聊机器人发送：`开始信号矩阵对比`。
+2. 机器人创建 `task_id`，回复任务编号和上传说明。
+3. 用户上传 `.xlsx`、`.xlsm` 或 `.zip` 文件，文件名需包含 `4.0` 或 `5.1`。
+4. 如果文件名无法识别版本，可先发送 `添加4.0文件` 或 `添加5.1文件` 作为下一次上传的版本提示。
+5. 机器人下载文件到 `temp/<task_id>/input/4.0` 或 `temp/<task_id>/input/5.1`。
+6. 上传完成后，用户发送：`开始处理`。
+7. 机器人通过独立后台进程启动：`python -m core.task_worker --task-id <task_id>`。
+8. 后台 worker 执行 legacy 规则流程、信号级 AI 辅助复核、生成 `review_items.json` 和 `review_state.json`。
+9. AI 复核完成后，机器人发送带 token 的人工审核链接：`{REVIEW_BASE_URL}/?task_id=<task_id>&token=<review_token>`。
+10. 用户在 Streamlit 页面完成人工审核并点击“完成审核并生成最终结果”。
+11. 系统生成 `人工审核后最终差异结果.xlsx`，并将 `result_delivery_status` 置为 `pending`。
+12. 机器人检测到 pending 后发送最终 Excel 和全部结果 ZIP；发送成功后状态变为 `delivered`，不会重复发送。
+
+### 文件安全
+
+飞书入口只允许以下后缀：
+
+- `.xlsx`
+- `.xlsm`
+- `.zip`
+
+文件名会被清理；ZIP 解压会拦截路径穿越（ZIP Slip），并只提取 `.xlsx` / `.xlsm`。单文件大小和任务总大小通过 `BOT_MAX_FILE_SIZE_MB`、`BOT_MAX_TASK_SIZE_MB` 控制。用户上传文件只会写入 `temp/<task_id>/input/...`，不会覆盖项目代码。
+
+### 任务目录
+
+飞书任务继续使用原有任务目录，并新增 bot 子目录：
+
+```text
+temp/<task_id>/
+├─ input/
+│  ├─ 4.0/
+│  └─ 5.1/
+├─ output/
+├─ review/
+├─ bot/
+│  ├─ received_files.json
+│  ├─ bot_events.jsonl
+│  └─ delivery_state.json
+└─ task_meta.json
+```
+
+`task_meta.json` 会补充飞书相关字段：`source`、`feishu_sender_id`、`feishu_chat_id`、`review_token`、`review_url`、`current_stage`、`signal_total`、`ai_required_signal_count`、`ai_completed_signal_count`、`ai_failed_signal_count`、`notification_status`、`result_delivery_status` 等。
+
+### 进度通知逻辑
+
+机器人不会在每个信号处理时刷屏。后台服务会定期扫描 `task_meta.json`，仅在阶段或关键进度变化时发送通知。AI 进度按信号级统计：
+
+- 信号级审核项总数；
+- 数值类系统直接判定真实差异数量；
+- 需要实际调用 AI 的纯文本信号数；
+- AI 已完成数；
+- AI 失败数；
+- 当前信号名。
+
+不会再按字段差异数量作为 AI 主进度。
+
+### 人工审核链接与权限
+
+飞书任务会生成高强度随机 `review_token`。Streamlit 页面支持从 query parameters 读取 `task_id` 和 `token`，并校验 `task_meta.json` 中保存的 `review_token`。校验失败会显示“无权访问或审核链接无效”。
+
+本地历史任务列表仍可用于本机调试和恢复；通过飞书 token 链接进入时，页面会默认隐藏历史任务入口，避免看到其他任务。
+
+### 服务重启恢复
+
+`bot_service.py` 启动时会扫描 `temp/*/task_meta.json`：
+
+- `running`：标记为 `interrupted`，避免误报完成；
+- `awaiting_review` 且通知未发送：重新尝试发送审核链接；
+- `final_exported` 且 `result_delivery_status=pending`：重新尝试发送最终 Excel 和 ZIP；
+- `delivered`：不重复发送。
+
+### 当前限制与需本机验证项
+
+当前 Codex 环境无法安装或运行公司 Windows 工作站上的 `lark-cli`，因此以下命令集中封装在 `core/lark_cli_client.py`，需要在公司工作站做真实验证：
+
+1. 普通 Excel / ZIP file 消息的事件字段：`file_key`、`file_name`、`message_id`、`sender_id`、`chat_id`；
+2. `im +messages-resources-download --type file` 下载 Excel/ZIP 附件；
+3. `im +messages-send --file <path>` 直接向用户发送 Excel/ZIP；
+4. 如需消息卡片或原消息更新，需验证对应 lark-cli 快捷命令或 Raw API。
+
+已从脱敏参考脚本和原本地示例确认的模式包括：`event consume im.message.receive_v1`、`im +messages-reply`、`im +messages-send --text/--markdown`、以及 `im +messages-resources-download` 的资源下载结构。
