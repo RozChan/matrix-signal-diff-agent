@@ -33,7 +33,6 @@ class LLMConfig:
     base_url: str
     model: str
     timeout_seconds: int
-    max_review_items: int
 
 
 def _candidate_env_files() -> list[Path]:
@@ -99,7 +98,6 @@ def get_llm_config() -> LLMConfig:
         base_url=os.getenv("LLM_BASE_URL", "").strip(),
         model=os.getenv("LLM_MODEL", "").strip(),
         timeout_seconds=_env_int("LLM_TIMEOUT_SECONDS", 30),
-        max_review_items=_env_int("LLM_MAX_REVIEW_ITEMS", 50),
     )
 
 
