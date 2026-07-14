@@ -41,11 +41,11 @@ from core.bot_task_store import (
 )
 from core.confluence_client import ConfluenceClient, ConfluenceError
 from core.confluence_source_parser import parse_confluence_sources
-from core.confluence_task_store import add_sources, load_confluence_sources, reset_failed_sources, set_worker_state, task_lock, update_source
+from core.confluence_task_store import add_sources, load_confluence_sources, set_worker_state, task_lock, update_source
 from core.file_intake import detect_version, sanitize_filename, store_received_file, validate_extension
 from core.lark_cli_client import LarkCliClient
 from core.progress_reporter import ProgressReporter
-from core.result_notifier import scan_and_notify
+from core.result_notifier import notify_review_ready, notify_task_failed, scan_and_notify
 from core.review_store import load_task_meta, update_task_meta
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", stream=sys.stderr)
@@ -216,6 +216,19 @@ def _start_worker(task_id: str, enable_ai: bool = True) -> subprocess.Popen:
     return subprocess.Popen(args, cwd=Path(__file__).resolve().parent, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def _monitor_worker_completion(task_id: str, tdir: Path, process: subprocess.Popen, client: LarkCliClient) -> None:
+    return_code = process.wait()
+    meta = load_task_meta(tdir)
+    if return_code != 0 and meta.get("status") not in {"failed", "awaiting_review", "final_exported", "delivered"}:
+        update_task_meta(tdir, status="failed", current_stage="失败", stage_progress=100, error=f"task_worker退出码非0：{return_code}")
+        meta = load_task_meta(tdir)
+    if meta.get("status") == "awaiting_review":
+        notify_review_ready(client, tdir, meta)
+    elif meta.get("status") == "failed":
+        notify_task_failed(client, tdir, meta)
+    log.info("worker finished task_id=%s return_code=%s status=%s", task_id, return_code, meta.get("status"))
+
+
 def _handle_process(event: dict[str, Any], client: LarkCliClient) -> None:
     sender = _sender_id(event)
     message_id = _message_id(event)
@@ -276,7 +289,7 @@ def _start_ready_task(task_id: str, tdir: Path, client: LarkCliClient, user_id: 
             return False
         set_worker_state(tdir, worker_starting=True, worker_started=False, worker_error="")
     try:
-        _start_worker(task_id, enable_ai=True)
+        process = _start_worker(task_id, enable_ai=True)
     except Exception as exc:  # noqa: BLE001
         set_worker_state(tdir, worker_starting=False, worker_started=False, worker_error=str(exc))
         update_task_meta(tdir, error=str(exc))
@@ -284,6 +297,8 @@ def _start_ready_task(task_id: str, tdir: Path, client: LarkCliClient, user_id: 
         return False
     set_worker_state(tdir, worker_starting=False, worker_started=True, worker_started_at=_utc_now_iso(), worker_error="")
     update_task_meta(tdir, status="running", current_stage="开始信号矩阵对比", stage_progress=1)
+    if hasattr(process, "wait"):
+        threading.Thread(target=_monitor_worker_completion, args=(task_id, tdir, process, client), daemon=True).start()
     if manual_ignore_failed and failed:
         client.send_text(user_id, f"已按你的确认忽略 {len(failed)} 个失败来源，正在使用已下载Excel开始信号矩阵差异识别。")
     else:
@@ -436,7 +451,11 @@ def _handle_retry_confluence(event: dict[str, Any], client: LarkCliClient) -> No
         client.reply_text(message_id, "未找到当前Confluence任务，请先发送Confluence页面地址。")
         return
     tdir = task_dir(task_id)
-    failed = reset_failed_sources(tdir)
+    with task_lock(tdir):
+        data = load_confluence_sources(tdir, task_id)
+        failed = _failed_sources(data)
+        for item in failed:
+            update_source(tdir, item.get("url", ""), status="pending", errors=[], downloaded_count=0)
     if not failed:
         client.reply_text(message_id, "当前任务没有失败的Confluence来源需要重试。")
         return
@@ -511,7 +530,7 @@ def handle_event(event: dict[str, Any], client: LarkCliClient) -> None:
 
 def recover_on_start(client: LarkCliClient) -> None:
     for tdir, meta in scan_task_metas():
-        if meta.get("source") != "feishu":
+        if meta.get("source") not in {"feishu", "feishu_confluence"}:
             continue
         if meta.get("status") == "running":
             update_task_meta(tdir, status="interrupted", error="bot_service 重启后无法确认后台 worker 是否仍在运行。")
@@ -523,7 +542,7 @@ def monitor_tasks_loop(client: LarkCliClient, interval_seconds: int = 15) -> Non
 
     while True:
         for tdir, meta in scan_task_metas():
-            if meta.get("source") != "feishu":
+            if meta.get("source") not in {"feishu", "feishu_confluence"}:
                 continue
             user_id = meta.get("feishu_sender_id")
             if user_id and meta.get("status") in {"running", "ai_review_done"}:

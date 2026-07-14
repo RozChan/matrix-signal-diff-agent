@@ -125,20 +125,3 @@ def update_source(task_dir: Path, url: str, **updates: Any) -> dict[str, Any]:
         _update_ready_flags(task_dir, data)
         save_confluence_sources(task_dir, data)
         return data
-
-
-def reset_failed_sources(task_dir: Path) -> list[dict[str, Any]]:
-    """Reset failed Confluence sources in one locked read-modify-write cycle."""
-
-    with task_lock(task_dir):
-        data = load_confluence_sources(task_dir)
-        failed: list[dict[str, Any]] = []
-        for item in data.get("sources", []):
-            if item.get("status") != "failed":
-                continue
-            item.update({"status": "pending", "errors": [], "downloaded_count": 0})
-            failed.append(dict(item))
-        if failed:
-            _update_ready_flags(task_dir, data)
-            save_confluence_sources(task_dir, data)
-        return failed
