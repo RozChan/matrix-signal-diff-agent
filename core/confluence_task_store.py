@@ -127,6 +127,28 @@ def _default_data(task_dir: Path, task_id: str | None = None) -> dict[str, Any]:
     }
 
 
+def task_lock(task_dir: Path):
+    return get_task_lock(task_dir)
+
+
+def _default_data(task_dir: Path, task_id: str | None = None) -> dict[str, Any]:
+    return {
+        "task_id": task_id or task_dir.name,
+        "sources": [],
+        "version_40_ready": False,
+        "version_51_ready": False,
+        "auto_start": True,
+        "sources_registration_complete": True,
+        "worker_starting": False,
+        "worker_started": False,
+        "worker_started_at": "",
+        "confluence_failure_notice_status": "pending",
+        "confluence_failure_notice_fingerprint": "",
+        "confluence_failure_notice_sent_at": "",
+        "confluence_failure_notice_error": "",
+    }
+
+
 def source_path(task_dir: Path) -> Path:
     return bot_dir(task_dir) / SOURCE_FILE
 

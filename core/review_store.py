@@ -7,7 +7,7 @@ import json
 import os
 import tempfile
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +44,35 @@ ITEM_HEADER_MAP = {
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+class ReviewConflictError(RuntimeError):
+    pass
+
+
+class ReviewLockError(RuntimeError):
+    pass
+
+
+def _parse_time(value: Any) -> datetime | None:
+    try:
+        if not value:
+            return None
+        parsed = datetime.fromisoformat(str(value))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _review_lock_minutes() -> int:
+    import os
+
+    return int(os.getenv("REVIEW_LOCK_TIMEOUT_MINUTES", "30"))
+
+
+def _task_dir_from_review_dir(review_dir: Path) -> Path:
+    path = Path(review_dir)
+    return path.parent if path.name == "review" else path
 
 
 def _read_json(path: Path, default: Any) -> Any:
@@ -121,6 +150,15 @@ def create_task_meta(task_dir: Path, task_id: str, input_40_count: int = 0, inpu
             "review_state_path": str(review_dir / REVIEW_STATE_FILE),
             "final_review_file": str(output_dir / "人工审核后最终差异结果.xlsx"),
             "error": "",
+            "review_lock_status": "unlocked",
+            "review_owner": "",
+            "review_session_id": "",
+            "review_locked_at": "",
+            "review_lock_last_active_at": "",
+            "review_lock_expires_at": "",
+            "review_completed": False,
+            "review_completed_at": "",
+            "final_generation_status": "",
         }
         save_task_meta(task_path, meta)
         return meta
@@ -327,7 +365,7 @@ def init_review_state(review_dir: Path, task_id: str, items: list[dict[str, Any]
     review_path = Path(review_dir)
     item_list = items if items is not None else load_review_items(review_path)
     existing = load_review_state(review_path) if _review_state_path(review_path).exists() and not overwrite else {"items": {}}
-    state = {"task_id": existing.get("task_id") or task_id, "updated_at": existing.get("updated_at") or utc_now_iso(), "items": dict(existing.get("items", {}))}
+    state = {"task_id": existing.get("task_id") or task_id, "updated_at": existing.get("updated_at") or utc_now_iso(), "revision": int(existing.get("revision") or 0), "items": dict(existing.get("items", {}))}
     changed = overwrite or not _review_state_path(review_path).exists()
     for item in item_list:
         item_id = item.get("item_id")
@@ -355,16 +393,19 @@ def load_review_state(review_dir: Path) -> dict[str, Any]:
     state = _read_json(_review_state_path(Path(review_dir)), {"task_id": "", "updated_at": "", "items": {}})
     state.setdefault("task_id", "")
     state.setdefault("updated_at", "")
+    state.setdefault("revision", 0)
     state.setdefault("items", {})
     state["items"] = {item_id: _normalize_review_entry(entry) for item_id, entry in state.get("items", {}).items()}
     return state
 
 
-def save_review_state(review_dir: Path, state: dict[str, Any]) -> None:
-    state = dict(state)
-    state["updated_at"] = utc_now_iso()
-    state.setdefault("items", {})
-    _atomic_write_json(_review_state_path(Path(review_dir)), state)
+def save_review_state(review_dir: Path, state: dict[str, Any], *, increment_revision: bool = False) -> None:
+    with get_task_lock(_task_dir_from_review_dir(Path(review_dir))):
+        state = dict(state)
+        state["updated_at"] = utc_now_iso()
+        state["revision"] = int(state.get("revision") or 0) + (1 if increment_revision else 0)
+        state.setdefault("items", {})
+        _atomic_write_json(_review_state_path(Path(review_dir)), state)
 
 
 def append_review_log(review_dir: Path, entry: dict[str, Any]) -> None:
@@ -375,31 +416,99 @@ def append_review_log(review_dir: Path, entry: dict[str, Any]) -> None:
         fh.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
 
 
-def update_review_item(review_dir: Path, task_id: str, item_id: str, manual_review_result: str, manual_note: str, reviewer: str = "") -> dict[str, Any]:
+def update_review_item(
+    review_dir: Path,
+    task_id: str,
+    item_id: str,
+    manual_review_result: str,
+    manual_note: str,
+    reviewer: str = "",
+    *,
+    base_revision: int | None = None,
+    session_id: str = "",
+) -> dict[str, Any]:
     if manual_review_result and manual_review_result not in MANUAL_REVIEW_RESULTS:
         raise ValueError(f"不支持的人工审核结果：{manual_review_result}")
-    state = load_review_state(review_dir)
-    if not state.get("task_id"):
-        state["task_id"] = task_id
-    previous = _normalize_review_entry(state.setdefault("items", {}).get(item_id, {}))
-    now = utc_now_iso()
-    state["items"][item_id] = {
-        "manual_review_result": manual_review_result,
-        "manual_note": manual_note,
-        "reviewed": True,
-        "review_source": MANUAL_SOURCE,
-        "default_review_result": previous.get("default_review_result", ""),
-        "default_reason": previous.get("default_reason", ""),
-        "reviewed_at": now,
-        "updated_at": now,
-        "reviewer": reviewer,
-    }
-    save_review_state(review_dir, state)
+    with get_task_lock(_task_dir_from_review_dir(Path(review_dir))):
+        if session_id:
+            ensure_review_lock_holder(_task_dir_from_review_dir(Path(review_dir)), session_id)
+        state = load_review_state(review_dir)
+        if base_revision is not None and int(state.get("revision") or 0) != int(base_revision):
+            raise ReviewConflictError("审核数据已被其他用户更新，请刷新页面")
+        if not state.get("task_id"):
+            state["task_id"] = task_id
+        previous = _normalize_review_entry(state.setdefault("items", {}).get(item_id, {}))
+        now = utc_now_iso()
+        state["items"][item_id] = {
+            "manual_review_result": manual_review_result,
+            "manual_note": manual_note,
+            "reviewed": True,
+            "review_source": MANUAL_SOURCE,
+            "default_review_result": previous.get("default_review_result", ""),
+            "default_reason": previous.get("default_reason", ""),
+            "reviewed_at": now,
+            "updated_at": now,
+            "reviewer": reviewer,
+        }
+        save_review_state(review_dir, state, increment_revision=True)
+        state = load_review_state(review_dir)
     try:
         append_review_log(review_dir, {"task_id": task_id, "item_id": item_id, "action": "update_review", "manual_review_result": manual_review_result, "manual_note": manual_note})
     except OSError:
         pass
     return state
+
+
+def acquire_review_lock(task_dir: Path, session_id: str, owner: str = "", *, takeover: bool = False) -> dict[str, Any]:
+    with get_task_lock(Path(task_dir)):
+        meta = load_task_meta(task_dir)
+        if meta.get("review_completed") or meta.get("status") in {"final_exported", "delivered"}:
+            raise ReviewLockError("该任务已完成审核，不能继续编辑")
+        now = datetime.now(timezone.utc)
+        expires = _parse_time(meta.get("review_lock_expires_at"))
+        current_session = str(meta.get("review_session_id") or "")
+        locked = meta.get("review_lock_status") == "locked" and expires and expires > now
+        if locked and current_session != session_id and not takeover:
+            raise ReviewLockError(f"该任务正在由{meta.get('review_owner') or current_session}审核，当前为只读模式")
+        return update_task_meta(
+            task_dir,
+            review_lock_status="locked",
+            review_owner=owner or session_id,
+            review_session_id=session_id,
+            review_locked_at=meta.get("review_locked_at") or utc_now_iso(),
+            review_lock_last_active_at=utc_now_iso(),
+            review_lock_expires_at=(now + timedelta(minutes=_review_lock_minutes())).isoformat(timespec="seconds"),
+        )
+
+
+def heartbeat_review_lock(task_dir: Path, session_id: str) -> dict[str, Any]:
+    with get_task_lock(Path(task_dir)):
+        ensure_review_lock_holder(task_dir, session_id)
+        return update_task_meta(
+            task_dir,
+            review_lock_last_active_at=utc_now_iso(),
+            review_lock_expires_at=(datetime.now(timezone.utc) + timedelta(minutes=_review_lock_minutes())).isoformat(timespec="seconds"),
+        )
+
+
+def ensure_review_lock_holder(task_dir: Path, session_id: str) -> None:
+    meta = load_task_meta(task_dir)
+    if meta.get("review_completed") or meta.get("status") in {"final_exported", "delivered"}:
+        raise ReviewLockError("该任务已完成审核或已交付，不能继续修改")
+    if meta.get("review_lock_status") != "locked" or meta.get("review_session_id") != session_id:
+        raise ReviewLockError("当前会话未持有审核编辑锁")
+    expires = _parse_time(meta.get("review_lock_expires_at"))
+    if expires and expires <= datetime.now(timezone.utc):
+        raise ReviewLockError("审核编辑锁已过期，请重新获取")
+
+
+def begin_final_generation(task_dir: Path, session_id: str) -> dict[str, Any]:
+    with get_task_lock(Path(task_dir)):
+        ensure_review_lock_holder(task_dir, session_id)
+        meta = load_task_meta(task_dir)
+        if meta.get("review_completed") or meta.get("final_generation_status") == "generating" or meta.get("status") in {"final_exported", "delivered"} or meta.get("result_delivery_status") in {"sending", "delivered"}:
+            raise ReviewLockError("该任务已完成审核或正在生成结果")
+        return update_task_meta(task_dir, review_completed=True, review_completed_at=utc_now_iso(), final_generation_status="generating")
 
 
 def review_badge(item: dict[str, Any], review: dict[str, Any]) -> str:
