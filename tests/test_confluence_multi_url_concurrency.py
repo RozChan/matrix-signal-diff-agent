@@ -12,8 +12,9 @@ import pytest
 import bot_service
 from core.bot_task_store import atomic_write_json
 from core.confluence_source_parser import parse_confluence_sources
-from core.confluence_task_store import add_sources, load_confluence_sources, task_lock, update_source
-from core.review_store import create_task_meta
+from core.confluence_task_store import add_sources, load_confluence_sources, set_worker_state, task_lock, update_source
+from core.review_store import create_task_meta, load_task_meta, update_task_meta
+from core.task_lock import get_task_lock
 
 REAL_MESSAGE = """4.0页面：https://yfconfluence.mychery.com/spaces/EEA51/pages/109052023/EMS_ICE-V4.9
 https://yfconfluence.mychery.com/spaces/EEA51/pages/109052027/EMS_PHEV+HEV-V2.4?src=contextnavpagetreemode
@@ -198,3 +199,53 @@ def test_handle_event_catches_exception(monkeypatch: pytest.MonkeyPatch) -> None
     client = DummyClient()
     bot_service.handle_event({"message_id": "m-exc", "sender_id": "u", "content": json.dumps({"text": "4.0页面：https://c/p"})}, client)
     assert any("本条消息处理失败" in reply for reply in client.replies)
+
+
+def test_task_meta_concurrent_updates_are_parseable_and_use_unique_temp(tmp_path: Path) -> None:
+    tdir = make_task(tmp_path)
+
+    def worker(index: int) -> None:
+        for inner in range(15):
+            update_task_meta(tdir, **{f"worker_{index}": inner})
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(7)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    meta = load_task_meta(tdir)
+    assert meta["task_id"] == "task1"
+    assert all(meta[f"worker_{i}"] == 14 for i in range(7))
+    assert not (tdir / "task_meta.json.tmp").exists()
+    json.loads((tdir / "task_meta.json").read_text(encoding="utf-8"))
+
+
+def test_confluence_store_and_task_meta_share_same_task_lock(tmp_path: Path) -> None:
+    tdir = make_task(tmp_path)
+    assert task_lock(tdir) is get_task_lock(tdir)
+
+
+def test_failed_source_summary_is_sent_once_for_same_fingerprint(tmp_path: Path) -> None:
+    tdir = make_task(tmp_path)
+    add_sources(tdir, sources(), auto_start=True)
+    for src in sources()[:3]:
+        update_source(tdir, str(src["url"]), status="completed")
+    update_source(tdir, str(sources()[3]["url"]), status="failed", errors=["boom"])
+    client = DummyClient()
+    failed = [item for item in load_confluence_sources(tdir)["sources"] if item["status"] == "failed"]
+    bot_service._notify_failed_sources_once("task1", tdir, client, "u", failed)
+    bot_service._notify_failed_sources_once("task1", tdir, client, "u", failed)
+    assert len(client.sent) == 1
+    data = load_confluence_sources(tdir)
+    assert data["confluence_failure_notice_status"] == "sent"
+    assert data["confluence_failure_notice_fingerprint"]
+
+
+def test_retry_resets_failure_notice_state(tmp_path: Path) -> None:
+    tdir = make_task(tmp_path)
+    set_worker_state(tdir, confluence_failure_notice_status="sent", confluence_failure_notice_fingerprint="old")
+    with task_lock(tdir):
+        set_worker_state(tdir, confluence_failure_notice_status="pending", confluence_failure_notice_fingerprint="", confluence_failure_notice_error="")
+    data = load_confluence_sources(tdir)
+    assert data["confluence_failure_notice_status"] == "pending"
+    assert data["confluence_failure_notice_fingerprint"] == ""

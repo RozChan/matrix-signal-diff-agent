@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import hashlib
 import subprocess
 import sys
 import tempfile
@@ -165,6 +166,19 @@ def _ensure_confluence_task_size(tdir: Path) -> None:
         raise ValueError(f"Confluence下载文件总大小超过限制：{round(total / 1024 / 1024, 2)}MB")
 
 
+def _safe_update_task_meta(tdir: Path, **updates: Any) -> bool:
+    try:
+        update_task_meta(tdir, **updates)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.error("task_meta状态保存失败：%s", exc)
+        try:
+            update_source(tdir, updates.get("source_url", ""), state_persistence_error=str(exc))
+        except Exception:  # noqa: BLE001
+            pass
+        return False
+
+
 def _handle_start(event: dict[str, Any], client: LarkCliClient) -> None:
     sender = _sender_id(event)
     message_id = _message_id(event)
@@ -265,6 +279,39 @@ def _notify_failed_sources(task_id: str, client: LarkCliClient, user_id: str, fa
     )
 
 
+def _failure_notice_fingerprint(task_id: str, failed: list[dict[str, Any]]) -> str:
+    parts = [task_id]
+    for item in sorted(failed, key=lambda src: str(src.get("url", ""))):
+        errors = ";".join(str(error) for error in (item.get("errors") or []))
+        parts.append(f"{item.get('url', '')}|{errors[:300]}")
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+
+
+def _notify_failed_sources_once(task_id: str, tdir: Path, client: LarkCliClient, user_id: str, failed: list[dict[str, Any]]) -> None:
+    if not failed:
+        return
+    fingerprint = _failure_notice_fingerprint(task_id, failed)
+    with task_lock(tdir):
+        data = load_confluence_sources(tdir, task_id)
+        sources = data.get("sources", [])
+        if any(item.get("status") not in {"completed", "failed"} for item in sources):
+            return
+        if data.get("confluence_failure_notice_fingerprint") == fingerprint and data.get("confluence_failure_notice_status") in {"sending", "sent"}:
+            return
+        data["confluence_failure_notice_status"] = "sending"
+        data["confluence_failure_notice_fingerprint"] = fingerprint
+        data["confluence_failure_notice_error"] = ""
+        set_worker_state(tdir, **data)
+    try:
+        _notify_failed_sources(task_id, client, user_id, failed)
+    except Exception as exc:  # noqa: BLE001
+        with task_lock(tdir):
+            set_worker_state(tdir, confluence_failure_notice_status="failed", confluence_failure_notice_error=str(exc))
+        return
+    with task_lock(tdir):
+        set_worker_state(tdir, confluence_failure_notice_status="sent", confluence_failure_notice_sent_at=_utc_now_iso(), confluence_failure_notice_error="")
+
+
 def _start_ready_task(task_id: str, tdir: Path, client: LarkCliClient, user_id: str, *, manual_ignore_failed: bool = False) -> bool:
     with task_lock(tdir):
         meta = load_task_meta(tdir)
@@ -279,7 +326,7 @@ def _start_ready_task(task_id: str, tdir: Path, client: LarkCliClient, user_id: 
         sources = data.get("sources", [])
         failed = _failed_sources(data)
         if failed and not manual_ignore_failed:
-            _notify_failed_sources(task_id, client, user_id, failed)
+            _notify_failed_sources_once(task_id, tdir, client, user_id, failed)
             return False
         unfinished = [item for item in sources if item.get("status") not in {"completed", "failed"}]
         if unfinished or not data.get("sources_registration_complete", True):
@@ -351,7 +398,7 @@ def _maybe_auto_start(task_id: str, tdir: Path, client: LarkCliClient, user_id: 
         source40, count40, source51, count51 = summary
         client.send_text(user_id, f"Confluence文件下载完成：\n- 4.0来源：{source40}个\n- 4.0 Excel：{count40}个\n- 5.1来源：{source51}个\n- 5.1 Excel：{count51}个")
     if should_notify_failed:
-        _notify_failed_sources(task_id, client, user_id, _failed_sources(load_confluence_sources(tdir, task_id)))
+        _notify_failed_sources_once(task_id, tdir, client, user_id, _failed_sources(load_confluence_sources(tdir, task_id)))
         return
     if can_auto_start:
         _start_ready_task(task_id, tdir, client, user_id, manual_ignore_failed=False)
@@ -366,7 +413,7 @@ def _download_confluence_source(task_id: str, tdir: Path, source: dict[str, Any]
     reporter = _REPORTERS.setdefault(task_id, ProgressReporter(client, user_id))
     try:
         update_source(tdir, url, status="scanning")
-        update_task_meta(tdir, status="created", current_stage=f"解析{version} Confluence页面", stage_progress=3)
+        _safe_update_task_meta(tdir, status="created", current_stage=f"解析{version} Confluence页面", stage_progress=3)
         reporter.send(f"任务编号：{task_id}\n当前阶段：正在解析 Confluence 页面\n版本：{version}\n网址：{url}", force=True)
         with ConfluenceClient() as confluence:
             page_id = confluence.resolve_page_id(url)
@@ -374,7 +421,7 @@ def _download_confluence_source(task_id: str, tdir: Path, source: dict[str, Any]
             attachments = confluence.discover_excel_attachments(page_id, mode, url)
             page_count = 1 if mode == "current_page" else len(confluence.list_descendant_pages(page_id))
             update_source(tdir, url, status="downloading", page_count=page_count, page_scanned=page_count, attachment_count=len(attachments), downloaded_count=0)
-            update_task_meta(tdir, current_stage=f"下载{version} Confluence矩阵", confluence_page_total=page_count, confluence_page_scanned=page_count, confluence_attachment_total=len(attachments))
+            _safe_update_task_meta(tdir, current_stage=f"下载{version} Confluence矩阵", confluence_page_total=page_count, confluence_page_scanned=page_count, confluence_attachment_total=len(attachments))
             if not attachments:
                 update_source(tdir, url, status="failed", errors=["该页面未发现 .xlsx/.xlsm 附件"], page_count=page_count, attachment_count=0, downloaded_count=0)
                 client.send_text(user_id, f"任务 {task_id}：{version} 来源未发现可用 Excel。\n网址：{url}")
@@ -394,20 +441,25 @@ def _download_confluence_source(task_id: str, tdir: Path, source: dict[str, Any]
                 attachment["version"] = version
                 downloaded.append(attachment)
                 update_source(tdir, url, downloaded_count=len(downloaded), attachments=downloaded)
-                update_task_meta(tdir, confluence_downloaded_count=len(downloaded), current_signal="")
+                _safe_update_task_meta(tdir, confluence_downloaded_count=len(downloaded), current_signal="")
                 reporter.send(f"任务编号：{task_id}\n当前阶段：下载{version} Confluence矩阵\n来源页面：1个\n已扫描页面：{page_count} / {page_count}\n发现Excel：{len(attachments)}\n已下载：{index} / {len(attachments)}")
-            update_source(tdir, url, status="completed", page_count=page_count, page_scanned=page_count, attachment_count=len(attachments), downloaded_count=len(downloaded), attachments=downloaded, errors=[])
+            try:
+                update_source(tdir, url, status="completed", page_count=page_count, page_scanned=page_count, attachment_count=len(attachments), downloaded_count=len(downloaded), attachments=downloaded, errors=[])
+            except Exception as exc:  # noqa: BLE001
+                client.send_text(user_id, f"任务 {task_id} 状态保存失败，已停止自动启动，请人工检查。\n网址：{url}\n错误：{exc}")
+                _safe_update_task_meta(tdir, status="interrupted", current_stage="任务状态保存失败", error=str(exc))
+                return
             count40, count51 = _count_input_files(tdir)
             client.send_text(user_id, f"已完成单个 Confluence 来源下载：\n版本：{version}\n模式：{'递归扫描子页面' if mode == 'children_recursive' else '当前页面'}\n网址：{url}\nExcel：{len(downloaded)}个\n当前4.0文件：{count40}个\n当前5.1文件：{count51}个")
             _maybe_auto_start(task_id, tdir, client, user_id)
     except ConfluenceError as exc:
         update_source(tdir, url, status="failed", errors=[str(exc)])
-        update_task_meta(tdir, current_stage="Confluence下载失败", error=str(exc))
+        _safe_update_task_meta(tdir, current_stage="Confluence下载失败", error=str(exc))
         client.send_text(user_id, f"Confluence处理失败：{exc}\n网址：{url}")
         _maybe_auto_start(task_id, tdir, client, user_id)
     except Exception as exc:  # noqa: BLE001
         update_source(tdir, url, status="failed", errors=[str(exc)])
-        update_task_meta(tdir, current_stage="Confluence下载失败", error=str(exc))
+        _safe_update_task_meta(tdir, current_stage="Confluence下载失败", error=str(exc))
         client.send_text(user_id, f"Confluence处理失败：{exc}\n网址：{url}")
         _maybe_auto_start(task_id, tdir, client, user_id)
 
@@ -456,6 +508,7 @@ def _handle_retry_confluence(event: dict[str, Any], client: LarkCliClient) -> No
         failed = _failed_sources(data)
         for item in failed:
             update_source(tdir, item.get("url", ""), status="pending", errors=[], downloaded_count=0)
+        set_worker_state(tdir, confluence_failure_notice_status="pending", confluence_failure_notice_fingerprint="", confluence_failure_notice_error="")
     if not failed:
         client.reply_text(message_id, "当前任务没有失败的Confluence来源需要重试。")
         return

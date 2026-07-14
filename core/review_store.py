@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from .task_lock import get_task_lock
 
 AI_REVIEW_SHEET = "AI辅助复核与人工审核明细"
 REVIEW_ITEMS_FILE = "review_items.json"
@@ -49,9 +54,37 @@ def _read_json(path: Path, default: Any) -> Any:
 
 def _atomic_write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp_path.replace(path)
+    payload = json.dumps(data, ensure_ascii=False, indent=2)
+    last_error: PermissionError | None = None
+    for attempt in range(5):
+        tmp_name = ""
+        fd = -1
+        try:
+            fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fd = -1
+                fh.write(payload)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp_name, path)
+            return
+        except PermissionError as exc:
+            last_error = exc
+            if fd >= 0:
+                os.close(fd)
+            if tmp_name:
+                Path(tmp_name).unlink(missing_ok=True)
+            if attempt == 4:
+                raise
+            time.sleep(0.05 * (2**attempt))
+        except Exception:
+            if fd >= 0:
+                os.close(fd)
+            if tmp_name:
+                Path(tmp_name).unlink(missing_ok=True)
+            raise
+    if last_error:
+        raise last_error
 
 
 def _task_meta_path(task_dir: Path) -> Path:
@@ -71,25 +104,26 @@ def _review_log_path(review_dir: Path) -> Path:
 
 
 def create_task_meta(task_dir: Path, task_id: str, input_40_count: int = 0, input_51_count: int = 0, status: str = "created") -> dict[str, Any]:
-    task_path = Path(task_dir)
-    output_dir = task_path / "output"
-    review_dir = task_path / "review"
-    now = utc_now_iso()
-    meta = {
-        "task_id": task_id,
-        "created_at": now,
-        "updated_at": now,
-        "status": status,
-        "input_40_count": input_40_count,
-        "input_51_count": input_51_count,
-        "output_dir": str(output_dir),
-        "review_items_path": str(review_dir / REVIEW_ITEMS_FILE),
-        "review_state_path": str(review_dir / REVIEW_STATE_FILE),
-        "final_review_file": str(output_dir / "人工审核后最终差异结果.xlsx"),
-        "error": "",
-    }
-    save_task_meta(task_path, meta)
-    return meta
+    with get_task_lock(Path(task_dir)):
+        task_path = Path(task_dir)
+        output_dir = task_path / "output"
+        review_dir = task_path / "review"
+        now = utc_now_iso()
+        meta = {
+            "task_id": task_id,
+            "created_at": now,
+            "updated_at": now,
+            "status": status,
+            "input_40_count": input_40_count,
+            "input_51_count": input_51_count,
+            "output_dir": str(output_dir),
+            "review_items_path": str(review_dir / REVIEW_ITEMS_FILE),
+            "review_state_path": str(review_dir / REVIEW_STATE_FILE),
+            "final_review_file": str(output_dir / "人工审核后最终差异结果.xlsx"),
+            "error": "",
+        }
+        save_task_meta(task_path, meta)
+        return meta
 
 
 def load_task_meta(task_dir: Path) -> dict[str, Any]:
@@ -97,16 +131,18 @@ def load_task_meta(task_dir: Path) -> dict[str, Any]:
 
 
 def save_task_meta(task_dir: Path, meta: dict[str, Any]) -> None:
-    meta = dict(meta)
-    meta["updated_at"] = utc_now_iso()
-    _atomic_write_json(_task_meta_path(Path(task_dir)), meta)
+    with get_task_lock(Path(task_dir)):
+        meta = dict(meta)
+        meta["updated_at"] = utc_now_iso()
+        _atomic_write_json(_task_meta_path(Path(task_dir)), meta)
 
 
 def update_task_meta(task_dir: Path, **updates: Any) -> dict[str, Any]:
-    meta = load_task_meta(task_dir)
-    meta.update(updates)
-    save_task_meta(task_dir, meta)
-    return meta
+    with get_task_lock(Path(task_dir)):
+        meta = load_task_meta(task_dir)
+        meta.update(updates)
+        save_task_meta(task_dir, meta)
+        return meta
 
 
 def _as_bool(value: Any) -> bool:
