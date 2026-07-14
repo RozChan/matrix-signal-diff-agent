@@ -173,17 +173,25 @@ def _parse_field_diff_details(text: str, diff_fields: list[str]) -> list[dict[st
         for block in blocks:
             lines = block.splitlines()
             field = lines[0].strip("【】") if lines else "未解析"
-            value_40 = ""
-            value_51 = ""
+            value_40_lines: list[str] = []
+            value_51_lines: list[str] = []
             field_type = "unknown"
+            current_target = ""
             for line in lines[1:]:
                 if line.startswith("4.0："):
-                    value_40 = line.replace("4.0：", "", 1)
+                    current_target = "4.0"
+                    value_40_lines.append(line.replace("4.0：", "", 1))
                 elif line.startswith("5.1："):
-                    value_51 = line.replace("5.1：", "", 1)
+                    current_target = "5.1"
+                    value_51_lines.append(line.replace("5.1：", "", 1))
                 elif line.startswith("类型："):
+                    current_target = ""
                     field_type = _field_type_from_detail(line)
-            details.append({"diff_field": field, "value_40": value_40, "value_51": value_51, "field_type": field_type})
+                elif current_target == "4.0":
+                    value_40_lines.append(line)
+                elif current_target == "5.1":
+                    value_51_lines.append(line)
+            details.append({"diff_field": field, "value_40": "\n".join(value_40_lines), "value_51": "\n".join(value_51_lines), "field_type": field_type})
     if details:
         return details
     return [{"diff_field": field, "value_40": "", "value_51": "", "field_type": "unknown"} for field in diff_fields]

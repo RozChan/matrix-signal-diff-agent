@@ -51,6 +51,13 @@ REVIEW_SOURCE_FILTERS = ["全部", "需人工优先确认", "系统默认保留"
 MANUAL_STATUS_FILTERS = ["全部", "待人工确认", "已有结论", "人工已修改", "系统默认结论", *MANUAL_REVIEW_RESULTS]
 
 
+def _display_text(value: object) -> str:
+    text = "" if value is None else str(value)
+    if text.strip().lower() in {"nan", "none"}:
+        return "<空>"
+    return text if text else "<空>"
+
+
 
 
 def _review_badge_style(badge: str) -> tuple[str, str, str]:
@@ -474,8 +481,11 @@ def _show_review_workspace() -> None:
             with st.expander("查看字段差异明细", expanded=True):
                 for diff in item.get("field_diffs", []):
                     st.markdown(f"**{diff.get('diff_field', '未解析')}**")
-                    st.write(f"4.0内容：{diff.get('value_40', '')}")
-                    st.write(f"5.1内容：{diff.get('value_51', '')}")
+                    left_diff, right_diff = st.columns(2)
+                    left_diff.markdown("4.0内容：")
+                    left_diff.code(_display_text(diff.get("value_40", "")), language="text")
+                    right_diff.markdown("5.1内容：")
+                    right_diff.code(_display_text(diff.get("value_51", "")), language="text")
                     field_type = {"numeric": "数值类", "text": "文本类", "unknown": "未解析"}.get(diff.get("field_type"), "未解析")
                     st.write(f"字段类型：{field_type}")
             with st.expander("查看原始差异点list", expanded=False):
@@ -537,7 +547,7 @@ def _show_final_export(task_dir: Path, review_dir: Path) -> None:
         stats = export_final_review_result(review_dir / "review_items.json", review_dir / "review_state.json", final_path)
         meta = load_task_meta(task_dir)
         updates = {"status": "final_exported"}
-        if meta.get("source") == "feishu":
+        if meta.get("source") in {"feishu", "feishu_confluence"}:
             updates["result_delivery_status"] = "pending"
         update_task_meta(task_dir, **updates)
         st.success(f"已生成：{final_path}")

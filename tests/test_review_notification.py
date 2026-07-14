@@ -14,7 +14,9 @@ from core.confluence_task_store import add_sources, update_source
 from core.lark_cli_client import LarkCliClient, LarkCliError
 from core.result_notifier import notify_review_ready, scan_and_notify
 from core.review_store import create_task_meta, load_task_meta, update_task_meta
-from tools import retry_task_notification
+from core.final_export import FINAL_REVIEW_FILENAME
+from core.result_notifier import deliver_results
+from tools import retry_result_delivery, retry_task_notification
 
 
 class RecordingClient:
@@ -29,6 +31,12 @@ class RecordingClient:
             raise RuntimeError("send boom")
         self.sent.append((chat_id or user_id or "", text or ""))
         return f"msg_{len(self.sent)}"
+
+    def send_file(self, user_id: str | None = None, file_path: Path | None = None, *, chat_id: str | None = None, timeout: int | None = None) -> str | None:
+        if self.fail:
+            raise RuntimeError("file boom")
+        self.sent.append((chat_id or user_id or "", f"FILE:{Path(file_path or "").name}:{timeout}"))
+        return f"file_{len(self.sent)}"
 
 
 def make_task(tmp_path: Path, task_id: str = "task_notice") -> Path:
@@ -244,3 +252,68 @@ def test_retry_task_notification_only_resends_notice(monkeypatch: pytest.MonkeyP
     assert load_task_meta(tdir)["notification_status"] == "sent"
     assert retry_task_notification.main(["--task-id", "retry_me"]) == 0
     assert len(client.sent) == 1
+
+
+def test_deliver_results_sends_files_to_chat_and_marks_delivered(tmp_path: Path) -> None:
+    tdir = make_task(tmp_path, "deliver_me")
+    out = tdir / "output"
+    out.mkdir(exist_ok=True)
+    (out / FINAL_REVIEW_FILENAME).write_bytes(b"excel")
+    update_task_meta(tdir, status="final_exported", result_delivery_status="pending")
+    client = RecordingClient()
+    client.task_dir = tdir
+    assert deliver_results(client, tdir, load_task_meta(tdir))
+    meta = load_task_meta(tdir)
+    assert meta["status"] == "delivered"
+    assert meta["result_delivery_status"] == "delivered"
+    assert meta["delivery_error"] == ""
+    assert any(target == "oc_chat1" and text.startswith("FILE:") for target, text in client.sent)
+    assert any("最终结果文件已发送" in text for _, text in client.sent)
+
+
+def test_deliver_results_failure_sets_failed_and_error(tmp_path: Path) -> None:
+    tdir = make_task(tmp_path, "deliver_fail")
+    out = tdir / "output"
+    out.mkdir(exist_ok=True)
+    (out / FINAL_REVIEW_FILENAME).write_bytes(b"excel")
+    update_task_meta(tdir, status="final_exported", result_delivery_status="pending")
+    client = RecordingClient(fail=True)
+    client.task_dir = tdir
+    assert not deliver_results(client, tdir, load_task_meta(tdir))
+    meta = load_task_meta(tdir)
+    assert meta["result_delivery_status"] == "failed"
+    assert "file boom" in meta["delivery_error"] or "send boom" in meta["delivery_error"]
+
+
+def test_deliver_results_missing_or_empty_file_does_not_call_feishu(tmp_path: Path) -> None:
+    tdir = make_task(tmp_path, "deliver_empty")
+    (tdir / "output").mkdir(exist_ok=True)
+    update_task_meta(tdir, status="final_exported", result_delivery_status="pending")
+    client = RecordingClient()
+    client.task_dir = tdir
+    assert not deliver_results(client, tdir, load_task_meta(tdir))
+    assert client.sent == []
+    assert load_task_meta(tdir)["result_delivery_status"] == "failed"
+
+
+def test_retry_result_delivery_does_not_rerun_task(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("TASK_ROOT_DIR", str(tmp_path))
+    tdir = make_task(tmp_path, "retry_delivery")
+    out = tdir / "output"
+    out.mkdir(exist_ok=True)
+    (out / FINAL_REVIEW_FILENAME).write_bytes(b"excel")
+    update_task_meta(tdir, status="final_exported", result_delivery_status="pending")
+    client = RecordingClient()
+    client.task_dir = tdir
+
+    class FakeCli:
+        def __init__(self, cli_path=None):
+            pass
+        def send_text(self, user_id=None, text=None, *, chat_id=None):
+            return client.send_text(user_id=user_id, chat_id=chat_id, text=text)
+        def send_file(self, user_id=None, file_path=None, *, chat_id=None, timeout=None):
+            return client.send_file(user_id=user_id, chat_id=chat_id, file_path=file_path, timeout=timeout)
+
+    monkeypatch.setattr(retry_result_delivery, "LarkCliClient", FakeCli)
+    assert retry_result_delivery.main(["--task-id", "retry_delivery"]) == 0
+    assert load_task_meta(tdir)["status"] == "delivered"

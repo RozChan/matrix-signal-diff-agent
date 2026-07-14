@@ -191,28 +191,54 @@ def notify_task_failed(client: Any, task_dir: Path, meta: dict[str, Any] | None 
 
 
 def deliver_results(client: Any, task_dir: Path, meta: dict[str, Any]) -> bool:
-    user_id = meta.get("feishu_sender_id")
-    if not user_id:
-        return False
-    if meta.get("result_delivery_status") == "sent":
-        return True
     final_path = task_dir / "output" / FINAL_REVIEW_FILENAME
-    if not final_path.exists():
-        update_task_meta(task_dir, result_delivery_status="failed", delivery_error="最终审核结果文件不存在")
-        return False
+    with task_lock(task_dir):
+        current = load_task_meta(task_dir)
+        if meta:
+            current.update({key: value for key, value in meta.items() if key not in current})
+        status = current.get("result_delivery_status") or "pending"
+        if status in {"sent", "delivered"} or current.get("status") == "delivered":
+            return True
+        started_at = _parse_iso(current.get("result_delivery_started_at"))
+        timeout_seconds = int(os.getenv("FEISHU_FILE_SEND_TIMEOUT_SECONDS", "120"))
+        if status == "sending" and started_at and (datetime.now(timezone.utc) - started_at).total_seconds() < timeout_seconds:
+            return False
+        if not final_path.exists() or final_path.stat().st_size <= 0:
+            update_task_meta(task_dir, result_delivery_status="failed", delivery_error="最终审核结果文件不存在或为空")
+            return False
+        try:
+            _notification_target(current)
+        except LarkCliError as exc:
+            update_task_meta(task_dir, result_delivery_status="failed", delivery_error=str(exc))
+            return False
+        current = update_task_meta(
+            task_dir,
+            result_delivery_status="sending",
+            result_delivery_started_at=_utc_now_iso(),
+            result_delivery_attempt_count=int(current.get("result_delivery_attempt_count") or 0) + 1,
+            delivery_error="",
+        )
     try:
         zip_path = build_results_zip(task_dir)
-        client.send_text(user_id, f"任务 {meta.get('task_id', task_dir.name)} 已完成，正在发送结果文件。")
-        final_msg = client.send_file(user_id, final_path)
-        zip_msg = client.send_file(user_id, zip_path)
+        _send_text(client, "最终结果已生成，正在发送文件。", current)
+        target = _notification_target(current)
+        timeout_seconds = int(os.getenv("FEISHU_FILE_SEND_TIMEOUT_SECONDS", "120"))
+        final_msg = client.send_file(file_path=final_path, timeout=timeout_seconds, **target)
+        zip_msg = client.send_file(file_path=zip_path, timeout=timeout_seconds, **target)
         if final_msg and zip_msg:
             atomic_write_json(bot_dir(task_dir) / "delivery_state.json", {"final_message_id": final_msg, "zip_message_id": zip_msg, "status": "sent"})
-            update_task_meta(task_dir, result_delivery_status="sent", status="delivered", delivery_error="")
+            update_task_meta(task_dir, result_delivery_status="delivered", status="delivered", result_delivered_at=_utc_now_iso(), delivery_error="")
+            _send_text(client, f"最终结果文件已发送。\n\n任务编号：{current.get('task_id', task_dir.name)}\n文件名：{FINAL_REVIEW_FILENAME}", current)
             return True
         update_task_meta(task_dir, result_delivery_status="failed", delivery_error="飞书文件发送失败")
+        _send_text(client, f"最终结果文件发送失败。\n\n任务编号：{current.get('task_id', task_dir.name)}\n原因：飞书文件发送失败\n\n结果文件已保存在服务器，请联系维护人员或使用补发功能。", current)
         return False
     except Exception as exc:  # noqa: BLE001
         update_task_meta(task_dir, result_delivery_status="failed", delivery_error=str(exc))
+        try:
+            _send_text(client, f"最终结果文件发送失败。\n\n任务编号：{current.get('task_id', task_dir.name)}\n原因：{exc}\n\n结果文件已保存在服务器，请联系维护人员或使用补发功能。", current)
+        except Exception:  # noqa: BLE001
+            pass
         return False
 
 
@@ -224,5 +250,5 @@ def scan_and_notify(client: Any) -> None:
             notify_review_ready(client, task_dir, meta)
         if meta.get("status") == "failed":
             notify_task_failed(client, task_dir, meta)
-        if meta.get("status") == "final_exported" and meta.get("result_delivery_status") == "pending":
+        if meta.get("status") == "final_exported" and meta.get("result_delivery_status") in {"pending", "failed", "sending", ""}:
             deliver_results(client, task_dir, meta)

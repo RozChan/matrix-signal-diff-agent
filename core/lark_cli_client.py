@@ -132,23 +132,26 @@ class LarkCliClient:
             return None
         return data.get("file_key") or data.get("file_token") or data.get("data", {}).get("file_key") or data.get("data", {}).get("file_token")
 
-    def send_file(self, user_id: str, file_path: Path) -> str | None:
+    def send_file(self, user_id: str | None = None, file_path: Path | None = None, *, chat_id: str | None = None, timeout: int | None = None) -> str | None:
         """Send a local file to a user.
 
         First attempts a direct ``im +messages-send --file`` style command. If
         this is unsupported in a local lark-cli version, validate and adjust only
         this adapter.
         """
+        if file_path is None:
+            raise FileNotFoundError("缺少待发送文件路径")
         file_path = Path(file_path).resolve()
         if not file_path.is_file():
             raise FileNotFoundError(file_path)
+        target_args = _message_target_args(chat_id=chat_id, user_id=user_id)
         data = self.run_cli(
             "im", "+messages-send",
-            "--user-id", user_id,
+            *target_args,
             "--file", str(file_path),
             "--as", "bot",
             "--format", "json",
-            timeout=120,
+            timeout=timeout or int(os.getenv("FEISHU_FILE_SEND_TIMEOUT_SECONDS", "120")),
             expect_json=True,
         )
         return _message_id(data)
@@ -207,9 +210,11 @@ class FakeLarkCliClient:
         output_path.write_bytes(src.read_bytes())
         return output_path
 
-    def send_file(self, user_id: str, file_path: Path) -> str:
+    def send_file(self, user_id: str | None = None, file_path: Path | None = None, *, chat_id: str | None = None, timeout: int | None = None) -> str:
         msg = f"fake_file_{len(self.sent)+1}"
-        self.sent.append({"message_id": msg, "user_id": user_id, "file": str(file_path)})
+        target_args = _message_target_args(chat_id=chat_id, user_id=user_id)
+        target_key = "chat_id" if target_args[0] == "--chat-id" else "user_id"
+        self.sent.append({"message_id": msg, target_key: target_args[1], "file": str(file_path)})
         return msg
 
     def get_message_detail(self, message_id: str) -> dict[str, Any] | None:
