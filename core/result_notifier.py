@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import zipfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +12,7 @@ from .bot_task_store import atomic_write_json, bot_dir
 from .bot_task_store import scan_task_metas
 from .confluence_task_store import task_lock
 from .final_export import FINAL_REVIEW_FILENAME
+from .lark_cli_client import LarkCliError
 from .pipeline import OUTPUT_FILENAMES
 from .review_store import load_task_meta, update_task_meta
 
@@ -24,12 +25,44 @@ def _notification_retry_limit() -> int:
     return int(os.getenv("FEISHU_NOTIFICATION_RETRY_LIMIT", "3"))
 
 
+def _retry_delay_minutes(attempt_number: int) -> int:
+    return [1, 5, 15][min(max(attempt_number - 1, 0), 2)]
+
+
+def _parse_iso(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
 def _is_feishu_task(meta: dict[str, Any]) -> bool:
     return meta.get("source") in {"feishu", "feishu_confluence"}
 
 
-def _review_recipient(meta: dict[str, Any]) -> str:
-    return str(meta.get("feishu_chat_id") or meta.get("feishu_sender_id") or "")
+def _notification_target(meta: dict[str, Any]) -> dict[str, str]:
+    chat_id = str(meta.get("feishu_chat_id") or "").strip()
+    user_id = str(meta.get("feishu_sender_id") or "").strip()
+    if chat_id:
+        if not chat_id.startswith("oc_"):
+            raise LarkCliError("非法 feishu_chat_id：chat_id 必须以 oc_ 开头")
+        return {"chat_id": chat_id}
+    if user_id:
+        if not user_id.startswith("ou_"):
+            raise LarkCliError("非法 feishu_sender_id：user_id 必须以 ou_ 开头")
+        return {"user_id": user_id}
+    raise LarkCliError("缺少有效飞书接收目标：需要 oc_ chat_id 或 ou_ user_id")
+
+
+def _send_text(client: Any, text: str, meta: dict[str, Any]) -> str | None:
+    target = _notification_target(meta)
+    return client.send_text(text=text, **target)
 
 
 def build_review_ready_text(task_dir: Path, meta: dict[str, Any]) -> str:
@@ -78,35 +111,55 @@ def notify_review_ready(client: Any, task_dir: Path, meta: dict[str, Any] | None
             return True
         if current.get("notification_status") == "sending" and not force:
             return False
-        if not force and int(current.get("notification_retry_count") or 0) >= _notification_retry_limit():
+        retry_count = int(current.get("notification_retry_count") or 0)
+        if not force and retry_count >= _notification_retry_limit():
             update_task_meta(task_dir, notification_status="failed", notification_error="通知重试次数已达上限")
             return False
-        recipient = _review_recipient(current)
+        next_retry_at = _parse_iso(current.get("notification_next_retry_at"))
+        if not force and next_retry_at and datetime.now(timezone.utc) < next_retry_at:
+            return False
         review_url = current.get("review_url")
         if not review_url:
             update_task_meta(task_dir, notification_status="failed", notification_error="review_url缺失")
             return False
-        if not recipient:
-            update_task_meta(task_dir, notification_status="failed", notification_error="feishu_chat_id缺失")
+        try:
+            _notification_target(current)
+        except LarkCliError as exc:
+            update_task_meta(
+                task_dir,
+                notification_status="failed",
+                notification_error=str(exc),
+                notification_retry_count=_notification_retry_limit(),
+                notification_next_retry_at="",
+            )
             return False
-        retry_count = 0 if force else int(current.get("notification_retry_count") or 0)
         current = update_task_meta(
             task_dir,
             notification_status="sending",
             notification_error="",
-            notification_retry_count=retry_count + 1,
+            notification_retry_count=(0 if force else retry_count) + 1,
+            notification_last_attempt_at=_utc_now_iso(),
+            notification_next_retry_at="",
         )
     text = build_review_ready_text(task_dir, current)
     try:
-        msg_id = client.send_text(recipient, text)
+        msg_id = _send_text(client, text, current)
         if not msg_id:
             raise RuntimeError("飞书文本消息发送失败")
     except Exception as exc:  # noqa: BLE001
+        retry_count = int(load_task_meta(task_dir).get("notification_retry_count") or 1)
+        next_retry_at = datetime.now(timezone.utc) + timedelta(minutes=_retry_delay_minutes(retry_count))
         with task_lock(task_dir):
-            update_task_meta(task_dir, notification_status="failed", notification_error=str(exc))
+            update_task_meta(
+                task_dir,
+                notification_status="failed",
+                notification_error=str(exc),
+                notification_last_attempt_at=_utc_now_iso(),
+                notification_next_retry_at=next_retry_at.isoformat(timespec="seconds"),
+            )
         return False
     with task_lock(task_dir):
-        update_task_meta(task_dir, notification_status="sent", notification_sent_at=_utc_now_iso(), notification_error="")
+        update_task_meta(task_dir, notification_status="sent", notification_sent_at=_utc_now_iso(), notification_error="", notification_next_retry_at="")
     return True
 
 
@@ -117,14 +170,15 @@ def notify_task_failed(client: Any, task_dir: Path, meta: dict[str, Any] | None 
             current.update({key: value for key, value in meta.items() if key not in current})
         if current.get("failure_notification_status") == "sent":
             return True
-        recipient = _review_recipient(current)
-        if not recipient:
-            update_task_meta(task_dir, failure_notification_status="failed", notification_error="feishu_chat_id缺失")
+        try:
+            _notification_target(current)
+        except LarkCliError as exc:
+            update_task_meta(task_dir, failure_notification_status="failed", notification_error=str(exc))
             return False
         update_task_meta(task_dir, failure_notification_status="sending")
     text = f"信号矩阵差异识别任务失败\n\n任务编号：{current.get('task_id', task_dir.name)}\n错误：{current.get('error') or '未知错误'}"
     try:
-        msg_id = client.send_text(recipient, text)
+        msg_id = _send_text(client, text, current)
         if not msg_id:
             raise RuntimeError("飞书失败通知发送失败")
     except Exception as exc:  # noqa: BLE001
