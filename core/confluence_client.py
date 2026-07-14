@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import os
 import time
 from pathlib import Path
@@ -51,7 +52,7 @@ class ConfluenceClient:
         self.base_url = (base_url or os.getenv("CONFLUENCE_BASE_URL", "")).rstrip("/")
         self.pat = pat if pat is not None else os.getenv("CONFLUENCE_PAT", "")
         self.timeout = timeout_seconds or int(os.getenv("CONFLUENCE_TIMEOUT_SECONDS", "30"))
-        self.allowed_hosts = _split_env("CONFLUENCE_ALLOWED_HOSTS") or ([urlparse(self.base_url).hostname] if self.base_url else [])
+        self.allowed_hosts = [host.lower() for host in (_split_env("CONFLUENCE_ALLOWED_HOSTS") or ([urlparse(self.base_url).hostname] if self.base_url else [])) if host]
         self.allowed_space_keys = set(_split_env("CONFLUENCE_ALLOWED_SPACE_KEYS"))
         self.max_pages = int(os.getenv("CONFLUENCE_MAX_PAGES", "500"))
         self.max_attachments = int(os.getenv("CONFLUENCE_MAX_ATTACHMENTS", "500"))
@@ -77,23 +78,48 @@ class ConfluenceClient:
 
     def _validate_allowed_url(self, url: str) -> None:
         parsed = urlparse(url)
-        host = parsed.hostname or ""
+        host = (parsed.hostname or "").lower()
         if parsed.username or parsed.password:
             raise ConfluenceError("Confluence URL 不允许包含用户名或密码")
         if parsed.scheme not in {"http", "https"}:
             raise ConfluenceError("Confluence URL 仅支持 http/https")
-        if _is_blocked_host(host):
-            raise ConfluenceError(f"禁止访问非白名单或本地地址：{host}")
+        if _is_ip_literal(host) or host in {"localhost"}:
+            raise ConfluenceError(f"禁止直接访问 IP 或本地地址：{host}")
         if self.allowed_hosts and host not in self.allowed_hosts:
             raise ConfluenceError(f"Confluence Host 不在白名单中：{host}")
 
-    def _request(self, method: str, url: str, *, params: dict[str, Any] | None = None, stream: bool = False) -> requests.Response:
+    def _request_once(self, method: str, url: str, *, params: dict[str, Any] | None = None, stream: bool = False) -> requests.Response:
         self._validate_allowed_url(url)
+        current_url = url
+        current_params = params
+        for _ in range(5):
+            response = self.session.request(
+                method,
+                current_url,
+                params=current_params,
+                timeout=(10, self.timeout),
+                verify=self.verify,
+                stream=stream,
+                allow_redirects=False,
+            )
+            if response.is_redirect or response.is_permanent_redirect:
+                location = response.headers.get("Location", "")
+                if not location:
+                    raise ConfluenceError("Confluence 重定向缺少 Location")
+                next_url = urljoin(current_url, location)
+                self._validate_allowed_url(next_url)
+                current_url = next_url
+                current_params = None
+                continue
+            self._validate_allowed_url(response.url or current_url)
+            return response
+        raise ConfluenceError("Confluence 重定向次数过多")
+
+    def _request(self, method: str, url: str, *, params: dict[str, Any] | None = None, stream: bool = False) -> requests.Response:
         last_error: Exception | None = None
         for attempt in range(3):
             try:
-                response = self.session.request(method, url, params=params, timeout=(10, self.timeout), verify=self.verify, stream=stream, allow_redirects=True)
-                self._validate_allowed_url(response.url)
+                response = self._request_once(method, url, params=params, stream=stream)
                 if response.status_code == 429 or 500 <= response.status_code < 600:
                     if attempt < 2:
                         time.sleep(1 + attempt * 2)
@@ -299,16 +325,12 @@ def _ssl_verify_value() -> bool | str:
     return ca_bundle if ca_bundle else verify_ssl
 
 
-def _is_blocked_host(host: str) -> bool:
-    host = (host or "").lower()
-    if host in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}:
+def _is_ip_literal(host: str) -> bool:
+    try:
+        ipaddress.ip_address((host or "").strip("[]"))
         return True
-    parts = host.split(".")
-    if len(parts) == 4 and all(part.isdigit() for part in parts):
-        first, second = int(parts[0]), int(parts[1])
-        if first == 10 or first == 127 or (first == 192 and second == 168) or (first == 172 and 16 <= second <= 31):
-            return True
-    return False
+    except ValueError:
+        return False
 
 
 def _is_excel_attachment(att: dict[str, Any], max_file_size: int) -> bool:

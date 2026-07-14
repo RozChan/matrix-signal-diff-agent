@@ -792,8 +792,9 @@ FEISHU_ALLOWED_OPEN_IDS=
 - 日志不会输出 Authorization Header；
 - `.env` 已被 `.gitignore` 忽略；
 - 只允许访问 `CONFLUENCE_ALLOWED_HOSTS`；
-- 禁止 localhost、127.0.0.1、0.0.0.0、内网 IP、URL 用户名密码和非白名单 Host；
-- 重定向后的 Host 也会重新校验；
+- 只按 Host 白名单放行：`CONFLUENCE_ALLOWED_HOSTS` 必须与 URL Host 精确匹配，子域名或其他域名不会因为解析到相同 IP 而放行；
+- 白名单中的公司 Confluence 域名允许解析到私网 IP；但用户直接输入任何 IP 地址（包括公网或私网 IP）、localhost、URL 用户名密码都会被拒绝；
+- 重定向后的 Host 会在跟随前重新校验，仍必须精确匹配白名单 Host；
 - 可通过 `CONFLUENCE_ALLOWED_SPACE_KEYS` 限制 Space；
 - 可通过 `FEISHU_ALLOWED_OPEN_IDS` 限制允许发起任务的飞书用户。
 
@@ -819,14 +820,16 @@ temp/<task_id>/input/5.1/
 
 - 4.0 至少下载到 1 个有效 Excel；
 - 5.1 至少下载到 1 个有效 Excel；
-- 所有 Confluence 来源都已完成或失败；
+- 所有 Confluence 来源都已 `completed`；
 - `BOT_AUTO_START_WHEN_BOTH_READY=true`；
 
-则自动启动：
+才会自动启动：
 
 ```bash
 python -m core.task_worker --task-id <task_id>
 ```
+
+如果任一 Confluence 来源 `failed`，机器人不会静默自动开始，而是列出失败来源、版本、网址和错误原因。用户可以回复“重试Confluence下载”重新扫描失败来源；或在确认已下载文件足够后回复“忽略失败来源并开始处理”。只有收到明确忽略指令后，机器人才会在 4.0/5.1 均已有有效 Excel 时启动 worker。
 
 如果任务已经进入 `running/awaiting_review/final_exported/delivered`，机器人不允许继续追加 Confluence URL，会提示新建任务。
 
