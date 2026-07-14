@@ -29,6 +29,10 @@ def _retry_delay_minutes(attempt_number: int) -> int:
     return [1, 5, 15][min(max(attempt_number - 1, 0), 2)]
 
 
+def _result_retry_limit() -> int:
+    return int(os.getenv("FEISHU_RESULT_DELIVERY_RETRY_LIMIT", "3"))
+
+
 def _parse_iso(value: Any) -> datetime | None:
     text = str(value or "").strip()
     if not text:
@@ -63,6 +67,44 @@ def _notification_target(meta: dict[str, Any]) -> dict[str, str]:
 def _send_text(client: Any, text: str, meta: dict[str, Any]) -> str | None:
     target = _notification_target(meta)
     return client.send_text(text=text, **target)
+
+
+def _result_failure_fingerprint(task_dir: Path, meta: dict[str, Any], error: str) -> str:
+    import hashlib
+
+    raw = "\n".join(
+        [
+            str(meta.get("task_id", task_dir.name)),
+            str(task_dir / "output" / FINAL_REVIEW_FILENAME),
+            str(meta.get("result_delivery_attempt_count") or 0),
+            str(error or "")[:300],
+        ]
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def should_attempt_result_delivery(meta: dict[str, Any], final_path: Path, now: datetime | None = None, *, force: bool = False) -> bool:
+    if force:
+        return True
+    now = now or datetime.now(timezone.utc)
+    if meta.get("status") in {"interrupted", "requires_manual_check", "delivered"}:
+        return False
+    if meta.get("status") != "final_exported":
+        return False
+    if not final_path.exists() or final_path.stat().st_size <= 0:
+        return False
+    status = meta.get("result_delivery_status") or "pending"
+    if status in {"sent", "delivered", "sending"}:
+        return False
+    attempt_count = int(meta.get("result_delivery_attempt_count") or 0)
+    if attempt_count >= _result_retry_limit() or meta.get("result_delivery_auto_retry_exhausted"):
+        return False
+    if status == "pending":
+        return True
+    if status == "failed":
+        next_retry_at = _parse_iso(meta.get("result_delivery_next_retry_at"))
+        return bool(next_retry_at and now >= next_retry_at)
+    return False
 
 
 def build_review_ready_text(task_dir: Path, meta: dict[str, Any]) -> str:
@@ -190,12 +232,61 @@ def notify_task_failed(client: Any, task_dir: Path, meta: dict[str, Any] | None 
     return True
 
 
-def deliver_results(client: Any, task_dir: Path, meta: dict[str, Any]) -> bool:
+def _send_result_failure_notice(client: Any, task_dir: Path, meta: dict[str, Any], error: str) -> None:
+    fingerprint = _result_failure_fingerprint(task_dir, meta, error)
+    with task_lock(task_dir):
+        current = load_task_meta(task_dir)
+        if current.get("result_delivery_failure_notice_fingerprint") == fingerprint and current.get("result_delivery_failure_notice_status") in {"sending", "sent"}:
+            return
+        current = update_task_meta(
+            task_dir,
+            result_delivery_failure_notice_status="sending",
+            result_delivery_failure_notice_fingerprint=fingerprint,
+        )
+    try:
+        _send_text(
+            client,
+            f"最终结果文件发送失败。\n\n任务编号：{current.get('task_id', task_dir.name)}\n原因：{error}\n\n结果文件已保存在服务器，请联系维护人员或使用补发功能。",
+            current,
+        )
+    except Exception as exc:  # noqa: BLE001
+        update_task_meta(task_dir, result_delivery_failure_notice_status="failed", result_delivery_failure_notice_error=str(exc))
+        return
+    update_task_meta(task_dir, result_delivery_failure_notice_status="sent", result_delivery_failure_notice_sent_at=_utc_now_iso(), result_delivery_failure_notice_error="")
+
+
+def _mark_result_delivery_failed(task_dir: Path, error: str) -> dict[str, Any]:
+    with task_lock(task_dir):
+        current = load_task_meta(task_dir)
+        attempt_count = int(current.get("result_delivery_attempt_count") or 0)
+        exhausted = attempt_count >= _result_retry_limit()
+        next_retry_at = ""
+        if not exhausted:
+            next_retry_at = (datetime.now(timezone.utc) + timedelta(minutes=_retry_delay_minutes(attempt_count))).isoformat(timespec="seconds")
+        return update_task_meta(
+            task_dir,
+            result_delivery_status="failed",
+            delivery_error=error,
+            result_delivery_last_attempt_at=_utc_now_iso(),
+            result_delivery_next_retry_at=next_retry_at,
+            result_delivery_auto_retry_exhausted=exhausted,
+        )
+
+
+def deliver_results(client: Any, task_dir: Path, meta: dict[str, Any], *, force: bool = False) -> bool:
     final_path = task_dir / "output" / FINAL_REVIEW_FILENAME
     with task_lock(task_dir):
         current = load_task_meta(task_dir)
         if meta:
             current.update({key: value for key, value in meta.items() if key not in current})
+        if current.get("status") == "final_exported" and (not final_path.exists() or final_path.stat().st_size <= 0):
+            update_task_meta(task_dir, result_delivery_status="failed", delivery_error="最终审核结果文件不存在或为空")
+            return False
+        if not should_attempt_result_delivery(current, final_path, force=force):
+            status = current.get("result_delivery_status") or "pending"
+            if status == "failed" and not current.get("result_delivery_next_retry_at") and not force:
+                update_task_meta(task_dir, result_delivery_auto_retry_exhausted=True)
+            return current.get("result_delivery_status") in {"sent", "delivered"} or current.get("status") == "delivered"
         status = current.get("result_delivery_status") or "pending"
         if status in {"sent", "delivered"} or current.get("status") == "delivered":
             return True
@@ -216,6 +307,8 @@ def deliver_results(client: Any, task_dir: Path, meta: dict[str, Any]) -> bool:
             result_delivery_status="sending",
             result_delivery_started_at=_utc_now_iso(),
             result_delivery_attempt_count=int(current.get("result_delivery_attempt_count") or 0) + 1,
+            result_delivery_next_retry_at="",
+            result_delivery_auto_retry_exhausted=False,
             delivery_error="",
         )
     try:
@@ -230,15 +323,19 @@ def deliver_results(client: Any, task_dir: Path, meta: dict[str, Any]) -> bool:
             update_task_meta(task_dir, result_delivery_status="delivered", status="delivered", result_delivered_at=_utc_now_iso(), delivery_error="")
             _send_text(client, f"最终结果文件已发送。\n\n任务编号：{current.get('task_id', task_dir.name)}\n文件名：{FINAL_REVIEW_FILENAME}", current)
             return True
-        update_task_meta(task_dir, result_delivery_status="failed", delivery_error="飞书文件发送失败")
-        _send_text(client, f"最终结果文件发送失败。\n\n任务编号：{current.get('task_id', task_dir.name)}\n原因：飞书文件发送失败\n\n结果文件已保存在服务器，请联系维护人员或使用补发功能。", current)
+        failed_meta = _mark_result_delivery_failed(task_dir, "飞书文件发送失败")
+        _send_result_failure_notice(client, task_dir, failed_meta, "飞书文件发送失败")
+        if failed_meta.get("result_delivery_auto_retry_exhausted"):
+            _send_text(client, f"最终结果自动发送已停止。\n任务编号：{current.get('task_id', task_dir.name)}\n请使用人工补发命令。", failed_meta)
         return False
     except Exception as exc:  # noqa: BLE001
-        update_task_meta(task_dir, result_delivery_status="failed", delivery_error=str(exc))
-        try:
-            _send_text(client, f"最终结果文件发送失败。\n\n任务编号：{current.get('task_id', task_dir.name)}\n原因：{exc}\n\n结果文件已保存在服务器，请联系维护人员或使用补发功能。", current)
-        except Exception:  # noqa: BLE001
-            pass
+        failed_meta = _mark_result_delivery_failed(task_dir, str(exc))
+        _send_result_failure_notice(client, task_dir, failed_meta, str(exc))
+        if failed_meta.get("result_delivery_auto_retry_exhausted"):
+            try:
+                _send_text(client, f"最终结果自动发送已停止。\n任务编号：{current.get('task_id', task_dir.name)}\n请使用人工补发命令。", failed_meta)
+            except Exception:  # noqa: BLE001
+                pass
         return False
 
 

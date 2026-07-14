@@ -317,3 +317,71 @@ def test_retry_result_delivery_does_not_rerun_task(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(retry_result_delivery, "LarkCliClient", FakeCli)
     assert retry_result_delivery.main(["--task-id", "retry_delivery"]) == 0
     assert load_task_meta(tdir)["status"] == "delivered"
+
+
+def test_failed_result_not_due_does_not_send_again(tmp_path: Path) -> None:
+    tdir = make_task(tmp_path, "old_failed")
+    out = tdir / "output"
+    out.mkdir(exist_ok=True)
+    (out / FINAL_REVIEW_FILENAME).write_bytes(b"excel")
+    update_task_meta(
+        tdir,
+        status="final_exported",
+        result_delivery_status="failed",
+        result_delivery_attempt_count=1,
+        result_delivery_next_retry_at="2999-01-01T00:00:00+00:00",
+        delivery_error="old failure",
+    )
+    client = RecordingClient()
+    client.task_dir = tdir
+    for _ in range(100):
+        assert not deliver_results(client, tdir, load_task_meta(tdir))
+    assert client.sent == []
+    assert load_task_meta(tdir)["result_delivery_attempt_count"] == 1
+
+
+def test_legacy_failed_result_without_retry_fields_is_suspended(tmp_path: Path) -> None:
+    tdir = make_task(tmp_path, "legacy_failed")
+    out = tdir / "output"
+    out.mkdir(exist_ok=True)
+    (out / FINAL_REVIEW_FILENAME).write_bytes(b"excel")
+    update_task_meta(tdir, status="final_exported", result_delivery_status="failed", delivery_error="old")
+    client = RecordingClient()
+    client.task_dir = tdir
+    assert not deliver_results(client, tdir, load_task_meta(tdir))
+    meta = load_task_meta(tdir)
+    assert meta["result_delivery_auto_retry_exhausted"] is True
+    assert client.sent == []
+
+
+def test_result_delivery_failure_notice_same_attempt_only_once(tmp_path: Path) -> None:
+    tdir = make_task(tmp_path, "fail_once")
+    out = tdir / "output"
+    out.mkdir(exist_ok=True)
+    (out / FINAL_REVIEW_FILENAME).write_bytes(b"excel")
+    update_task_meta(tdir, status="final_exported", result_delivery_status="pending")
+    client = RecordingClient(fail=True)
+    client.task_dir = tdir
+    assert not deliver_results(client, tdir, load_task_meta(tdir))
+    sent_count = len(client.sent)
+    assert not deliver_results(client, tdir, load_task_meta(tdir))
+    assert len(client.sent) == sent_count
+
+
+def test_result_delivery_force_bypasses_exhaustion(tmp_path: Path) -> None:
+    tdir = make_task(tmp_path, "force_delivery")
+    out = tdir / "output"
+    out.mkdir(exist_ok=True)
+    (out / FINAL_REVIEW_FILENAME).write_bytes(b"excel")
+    update_task_meta(
+        tdir,
+        status="final_exported",
+        result_delivery_status="failed",
+        result_delivery_attempt_count=3,
+        result_delivery_auto_retry_exhausted=True,
+        delivery_error="old",
+    )
+    client = RecordingClient()
+    client.task_dir = tdir
+    assert deliver_results(client, tdir, load_task_meta(tdir), force=True)
+    assert load_task_meta(tdir)["status"] == "delivered"

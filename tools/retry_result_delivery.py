@@ -28,7 +28,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.force:
         meta = update_task_meta(tdir, result_delivery_status="pending", delivery_error="")
-    ok = deliver_results(LarkCliClient(os.getenv("LARK_CLI_PATH", "").strip() or None), tdir, meta)
+    ok = deliver_results(LarkCliClient(os.getenv("LARK_CLI_PATH", "").strip() or None), tdir, meta, force=args.force)
     if ok:
         print(f"已发送最终结果文件：{args.task_id}")
         return 0
