@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,32 @@ from .review_store import update_task_meta
 from .task_lock import get_task_lock
 
 SOURCE_FILE = "confluence_sources.json"
+_TASK_LOCKS: dict[str, threading.RLock] = {}
+_TASK_LOCKS_GUARD = threading.Lock()
+
+
+def task_lock(task_dir: Path) -> threading.RLock:
+    key = str(Path(task_dir).resolve())
+    with _TASK_LOCKS_GUARD:
+        lock = _TASK_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _TASK_LOCKS[key] = lock
+        return lock
+
+
+def _default_data(task_dir: Path, task_id: str | None = None) -> dict[str, Any]:
+    return {
+        "task_id": task_id or task_dir.name,
+        "sources": [],
+        "version_40_ready": False,
+        "version_51_ready": False,
+        "auto_start": True,
+        "sources_registration_complete": True,
+        "worker_starting": False,
+        "worker_started": False,
+        "worker_started_at": "",
+    }
 
 
 def task_lock(task_dir: Path):
