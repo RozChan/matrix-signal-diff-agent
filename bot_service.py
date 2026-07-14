@@ -1,0 +1,537 @@
+"""Feishu bot entrypoint for matrix signal diff tasks.
+
+This service adds a Feishu/lark-cli entry to the existing local Streamlit
+workflow. It keeps message handling short, persists task state under
+``temp/<task_id>``, and starts long-running matrix processing in a separate
+worker subprocess.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import threading
+from pathlib import Path
+from typing import Any
+
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except Exception:  # noqa: BLE001
+    pass
+
+from core.bot_task_store import (
+    append_bot_event,
+    bot_dir,
+    clear_active_session,
+    create_upload_session,
+    get_active_task_id,
+    get_task_root,
+    record_received_file,
+    scan_task_metas,
+    task_dir,
+)
+from core.confluence_client import ConfluenceClient, ConfluenceError
+from core.confluence_source_parser import parse_confluence_sources
+from core.confluence_task_store import add_source, load_confluence_sources, update_source
+from core.file_intake import detect_version, sanitize_filename, store_received_file, validate_extension
+from core.lark_cli_client import LarkCliClient
+from core.progress_reporter import ProgressReporter
+from core.result_notifier import scan_and_notify
+from core.review_store import load_task_meta, update_task_meta
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", stream=sys.stderr)
+log = logging.getLogger("matrix-feishu-bot")
+
+START_COMMANDS = {"开始信号矩阵对比", "开始矩阵对比", "信号矩阵对比", "新建任务"}
+PROCESS_COMMANDS = {"开始处理", "开始识别", "开始"}
+RETRY_CONFLUENCE_COMMANDS = {"重试Confluence下载", "重试confluence下载", "重试下载"}
+IGNORE_FAILED_CONFLUENCE_COMMANDS = {"忽略失败来源并开始处理", "忽略失败并开始处理"}
+ADD_40_COMMANDS = {"添加4.0文件", "上传4.0", "4.0"}
+ADD_51_COMMANDS = {"添加5.1文件", "上传5.1", "5.1"}
+_PROCESSED: set[str] = set()
+_PROCESSED_LOCK = threading.Lock()
+_MAX_PROCESSED = 2000
+_VERSION_HINTS: dict[str, str] = {}
+_LAST_STAGE_NOTICE: dict[str, str] = {}
+_REPORTERS: dict[str, ProgressReporter] = {}
+
+
+def _env_bool(name: str, default: str = "false") -> bool:
+    return os.getenv(name, default).strip().lower() == "true"
+
+
+def _allowed_user(sender_id: str) -> bool:
+    allowed = [part.strip() for part in os.getenv("FEISHU_ALLOWED_OPEN_IDS", "").split(",") if part.strip()]
+    return not allowed or sender_id in allowed
+
+
+def _dedupe(message_id: str) -> bool:
+    with _PROCESSED_LOCK:
+        if message_id in _PROCESSED:
+            return False
+        _PROCESSED.add(message_id)
+        if len(_PROCESSED) > _MAX_PROCESSED:
+            for old in list(_PROCESSED)[: _MAX_PROCESSED // 2]:
+                _PROCESSED.discard(old)
+    return True
+
+
+def _extract_text(event: dict[str, Any]) -> str:
+    content = event.get("content", "")
+    if isinstance(content, str):
+        try:
+            data = json.loads(content)
+            return str(data.get("text") or data.get("content") or content).strip()
+        except json.JSONDecodeError:
+            return content.strip()
+    if isinstance(content, dict):
+        return str(content.get("text") or content.get("content") or "").strip()
+    return ""
+
+
+def _extract_file_info(event: dict[str, Any]) -> dict[str, str] | None:
+    content = event.get("content", {})
+    data: dict[str, Any]
+    if isinstance(content, str):
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError:
+            data = {}
+    elif isinstance(content, dict):
+        data = content
+    else:
+        data = {}
+    file_key = str(data.get("file_key") or data.get("key") or data.get("file_token") or data.get("fileKey") or "")
+    file_name = str(data.get("file_name") or data.get("name") or data.get("fileName") or data.get("title") or "")
+    if not file_key:
+        m = re.search(r"(file|box|tmp|om)_[-_A-Za-z0-9]+", json.dumps(data, ensure_ascii=False))
+        file_key = m.group(0) if m else ""
+    if not file_name:
+        for value in data.values():
+            if isinstance(value, str) and Path(value).suffix.lower() in {".xlsx", ".xlsm", ".zip"}:
+                file_name = value
+                break
+    if file_key or file_name:
+        return {"file_key": file_key, "file_name": sanitize_filename(file_name or f"{file_key}.bin")}
+    return None
+
+
+def _sender_id(event: dict[str, Any]) -> str:
+    return str(event.get("sender_id") or event.get("sender", {}).get("sender_id", {}).get("open_id") or "")
+
+
+def _chat_id(event: dict[str, Any]) -> str:
+    return str(event.get("chat_id") or event.get("message", {}).get("chat_id") or "")
+
+
+def _message_id(event: dict[str, Any]) -> str:
+    return str(event.get("message_id") or event.get("message", {}).get("message_id") or "")
+
+
+def _message_type(event: dict[str, Any]) -> str:
+    return str(event.get("message_type") or event.get("message", {}).get("message_type") or "")
+
+
+def _ensure_session(sender_id: str, chat_id: str, message_id: str, client: LarkCliClient) -> tuple[str, Path]:
+    task_id = get_active_task_id(sender_id)
+    if not task_id:
+        session = create_upload_session(sender_id, chat_id, message_id)
+        task_id = session["task_id"]
+        client.reply_text(message_id, f"已创建任务：{task_id}\n请上传文件，文件名需包含 4.0 或 5.1。支持 xlsx、xlsm、zip。上传完成后发送“开始处理”。")
+    return task_id, task_dir(task_id)
+
+
+def _count_input_files(tdir: Path) -> tuple[int, int]:
+    return (len(list((tdir / "input" / "4.0").glob("*.xls*"))), len(list((tdir / "input" / "5.1").glob("*.xls*"))))
+
+
+def _ensure_confluence_task_size(tdir: Path) -> None:
+    limit = int(os.getenv("CONFLUENCE_MAX_TASK_SIZE_MB", "1000")) * 1024 * 1024
+    total = sum(path.stat().st_size for path in (tdir / "input").rglob("*") if path.is_file())
+    if total > limit:
+        raise ValueError(f"Confluence下载文件总大小超过限制：{round(total / 1024 / 1024, 2)}MB")
+
+
+def _handle_start(event: dict[str, Any], client: LarkCliClient) -> None:
+    sender = _sender_id(event)
+    message_id = _message_id(event)
+    session = create_upload_session(sender, _chat_id(event), message_id)
+    client.reply_text(message_id, f"任务编号：{session['task_id']}\n请上传文件，文件名需包含 4.0 或 5.1。支持 xlsx、xlsm、zip。上传完成后发送“开始处理”。")
+
+
+def _handle_file(event: dict[str, Any], client: LarkCliClient) -> None:
+    if not _env_bool("BOT_ALLOW_FILE_UPLOAD", "false"):
+        client.reply_text(_message_id(event), "当前任务暂时使用Confluence网址作为输入，请发送4.0和5.1的Confluence页面地址。")
+        return
+    sender = _sender_id(event)
+    message_id = _message_id(event)
+    task_id, tdir = _ensure_session(sender, _chat_id(event), message_id, client)
+    file_info = _extract_file_info(event)
+    if not file_info:
+        client.reply_text(message_id, "暂未从该飞书事件中解析到文件信息，请在公司工作站验证 file 消息事件字段。")
+        return
+    file_name = file_info["file_name"]
+    version = detect_version(file_name, _VERSION_HINTS.get(sender, ""))
+    try:
+        validate_extension(file_name)
+    except ValueError as exc:
+        client.reply_text(message_id, str(exc))
+        return
+    if not version:
+        client.reply_text(message_id, "无法识别文件版本。请确保文件名包含 4.0 或 5.1，或先发送“添加4.0文件/添加5.1文件”。")
+        return
+    tmp_path = Path(tempfile.mkdtemp()) / sanitize_filename(file_name)
+    downloaded = client.download_message_file(message_id, file_info.get("file_key", ""), tmp_path, file_type="file")
+    if not downloaded:
+        client.reply_text(message_id, "文件下载失败：当前 lark-cli 文件下载命令需在公司工作站验证。")
+        return
+    try:
+        stored = store_received_file(downloaded, tdir, file_name, version)
+        records = record_received_file(tdir, {"message_id": message_id, "file_key": file_info.get("file_key", ""), "file_name": file_name, "version": version, "stored_files": [str(p.name) for p in stored]})
+        count40 = sum(1 for item in records if item.get("version") == "4.0")
+        count51 = sum(1 for item in records if item.get("version") == "5.1")
+        client.reply_text(message_id, f"已接收：\n版本：{version}\n文件：{file_name}\n当前4.0文件：{count40}个\n当前5.1文件：{count51}个\n上传完成后发送“开始处理”。")
+    except Exception as exc:  # noqa: BLE001
+        client.reply_text(message_id, f"文件处理失败：{exc}")
+
+
+def _start_worker(task_id: str, enable_ai: bool = True) -> subprocess.Popen:
+    args = [sys.executable, "-m", "core.task_worker", "--task-id", task_id]
+    if not enable_ai:
+        args.append("--disable-ai")
+    log.info("start worker: %s", " ".join(args))
+    return subprocess.Popen(args, cwd=Path(__file__).resolve().parent, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _handle_process(event: dict[str, Any], client: LarkCliClient) -> None:
+    sender = _sender_id(event)
+    message_id = _message_id(event)
+    task_id = get_active_task_id(sender)
+    if not task_id:
+        client.reply_text(message_id, "未找到当前上传会话，请先发送“开始信号矩阵对比”。")
+        return
+    tdir = task_dir(task_id)
+    if _start_ready_task(task_id, tdir, client, sender, manual_ignore_failed=False):
+        clear_active_session(sender)
+        client.reply_text(message_id, f"任务 {task_id} 已启动后台处理。处理完成后我会发送人工审核链接。")
+
+
+def _failed_sources(data: dict[str, Any]) -> list[dict[str, Any]]:
+    return [item for item in data.get("sources", []) if item.get("status") == "failed"]
+
+
+def _format_failed_sources(failed: list[dict[str, Any]]) -> str:
+    lines = []
+    for index, item in enumerate(failed, start=1):
+        errors = item.get("errors") or []
+        reason = "; ".join(str(error) for error in errors) if errors else "未知错误"
+        lines.append(f"{index}. 版本：{item.get('version', '')}\n   网址：{item.get('url', '')}\n   原因：{reason}")
+    return "\n".join(lines)
+
+
+def _notify_failed_sources(task_id: str, client: LarkCliClient, user_id: str, failed: list[dict[str, Any]]) -> None:
+    client.send_text(
+        user_id,
+        f"任务 {task_id} 存在 Confluence 来源下载失败，已停止自动开始处理。\n\n"
+        f"失败来源：\n{_format_failed_sources(failed)}\n\n"
+        "如需重试，请回复“重试Confluence下载”。\n"
+        "如确认忽略这些失败来源并使用已下载Excel继续，请回复“忽略失败来源并开始处理”。",
+    )
+
+
+def _start_ready_task(task_id: str, tdir: Path, client: LarkCliClient, user_id: str, *, manual_ignore_failed: bool = False) -> bool:
+    meta = load_task_meta(tdir)
+    if meta.get("status") in {"running", "ai_review_done", "awaiting_review", "final_exported", "delivered"}:
+        return False
+    count40, count51 = _count_input_files(tdir)
+    update_task_meta(tdir, input_40_count=count40, input_51_count=count51)
+    if count40 < 1 or count51 < 1:
+        client.send_text(user_id, f"暂不能开始处理：4.0和5.1均需至少1个有效Excel。当前：4.0={count40}，5.1={count51}")
+        return False
+    data = load_confluence_sources(tdir, task_id)
+    sources = data.get("sources", [])
+    failed = _failed_sources(data)
+    if failed and not manual_ignore_failed:
+        _notify_failed_sources(task_id, client, user_id, failed)
+        return False
+    unfinished = [item for item in sources if item.get("status") not in {"completed", "failed"}]
+    if unfinished:
+        client.send_text(user_id, "Confluence来源仍在下载或扫描中，请稍后再试。")
+        return False
+    update_task_meta(tdir, status="running", current_stage="开始信号矩阵对比", stage_progress=1)
+    _start_worker(task_id, enable_ai=True)
+    if manual_ignore_failed and failed:
+        client.send_text(user_id, f"已按你的确认忽略 {len(failed)} 个失败来源，正在使用已下载Excel开始信号矩阵差异识别。")
+    else:
+        client.send_text(user_id, f"Confluence文件下载完成：\n\n4.0文件：{count40}个\n5.1文件：{count51}个\n\n正在自动开始信号矩阵差异识别。")
+    return True
+
+
+def _maybe_auto_start(task_id: str, tdir: Path, client: LarkCliClient, user_id: str) -> None:
+    data = load_confluence_sources(tdir, task_id)
+    sources = data.get("sources", [])
+    if not sources:
+        return
+    failed = _failed_sources(data)
+    if failed:
+        _notify_failed_sources(task_id, client, user_id, failed)
+        return
+    all_completed = all(item.get("status") == "completed" for item in sources)
+    if all_completed and _env_bool("BOT_AUTO_START_WHEN_BOTH_READY", "true"):
+        _start_ready_task(task_id, tdir, client, user_id, manual_ignore_failed=False)
+    elif all_completed:
+        count40, count51 = _count_input_files(tdir)
+        update_task_meta(tdir, input_40_count=count40, input_51_count=count51)
+        client.send_text(user_id, f"Confluence文件下载完成：\n\n4.0文件：{count40}个\n5.1文件：{count51}个\n\n请发送“开始处理”。")
+
+
+def _download_confluence_source(task_id: str, tdir: Path, source: dict[str, Any], client: LarkCliClient, user_id: str) -> None:
+    url = source["url"]
+    version = source["version"]
+    mode = source["mode"]
+    reporter = _REPORTERS.setdefault(task_id, ProgressReporter(client, user_id))
+    try:
+        update_source(tdir, url, status="scanning")
+        update_task_meta(tdir, status="created", current_stage=f"解析{version} Confluence页面", stage_progress=3)
+        reporter.send(f"任务编号：{task_id}\n当前阶段：正在解析 Confluence 页面\n版本：{version}\n网址：{url}", force=True)
+        with ConfluenceClient() as confluence:
+            page_id = confluence.resolve_page_id(url)
+            update_source(tdir, url, resolved_page_id=page_id, status="scanning")
+            attachments = confluence.discover_excel_attachments(page_id, mode, url)
+            page_count = 1 if mode == "current_page" else len(confluence.list_descendant_pages(page_id))
+            update_source(tdir, url, status="downloading", page_count=page_count, page_scanned=page_count, attachment_count=len(attachments), downloaded_count=0)
+            update_task_meta(tdir, current_stage=f"下载{version} Confluence矩阵", confluence_page_total=page_count, confluence_page_scanned=page_count, confluence_attachment_total=len(attachments))
+            if not attachments:
+                update_source(tdir, url, status="failed", errors=["该页面未发现 .xlsx/.xlsm 附件"], page_count=page_count, attachment_count=0, downloaded_count=0)
+                client.send_text(user_id, f"任务 {task_id}：{version} 来源未发现可用 Excel。\n网址：{url}")
+                _maybe_auto_start(task_id, tdir, client, user_id)
+                return
+            target_dir = tdir / "input" / version
+            downloaded = []
+            seen_ids: set[str] = set()
+            for index, attachment in enumerate(attachments, start=1):
+                aid = attachment.get("attachment_id", "")
+                if aid and aid in seen_ids:
+                    continue
+                seen_ids.add(aid)
+                local_path = confluence.download_attachment(attachment, target_dir)
+                _ensure_confluence_task_size(tdir)
+                attachment["local_path"] = str(local_path)
+                attachment["version"] = version
+                downloaded.append(attachment)
+                update_source(tdir, url, downloaded_count=len(downloaded), attachments=downloaded)
+                update_task_meta(tdir, confluence_downloaded_count=len(downloaded), current_signal="")
+                reporter.send(f"任务编号：{task_id}\n当前阶段：下载{version} Confluence矩阵\n来源页面：1个\n已扫描页面：{page_count} / {page_count}\n发现Excel：{len(attachments)}\n已下载：{index} / {len(attachments)}")
+            data = update_source(tdir, url, status="completed", page_count=page_count, page_scanned=page_count, attachment_count=len(attachments), downloaded_count=len(downloaded), attachments=downloaded, errors=[])
+            count40, count51 = _count_input_files(tdir)
+            client.send_text(user_id, f"已完成 Confluence 下载：\n版本：{version}\n模式：{'递归扫描子页面' if mode == 'children_recursive' else '当前页面'}\nExcel：{len(downloaded)}个\n当前4.0文件：{count40}个\n当前5.1文件：{count51}个")
+            _maybe_auto_start(task_id, tdir, client, user_id)
+    except ConfluenceError as exc:
+        update_source(tdir, url, status="failed", errors=[str(exc)])
+        update_task_meta(tdir, current_stage="Confluence下载失败", error=str(exc))
+        client.send_text(user_id, f"Confluence处理失败：{exc}\n网址：{url}")
+        _maybe_auto_start(task_id, tdir, client, user_id)
+    except Exception as exc:  # noqa: BLE001
+        update_source(tdir, url, status="failed", errors=[str(exc)])
+        update_task_meta(tdir, current_stage="Confluence下载失败", error=str(exc))
+        client.send_text(user_id, f"Confluence处理失败：{exc}\n网址：{url}")
+        _maybe_auto_start(task_id, tdir, client, user_id)
+
+
+def _handle_confluence_message(event: dict[str, Any], client: LarkCliClient, text: str) -> bool:
+    parsed = parse_confluence_sources(text)
+    if not parsed.sources and not parsed.unresolved_urls:
+        return False
+    sender = _sender_id(event)
+    message_id = _message_id(event)
+    task_id = get_active_task_id(sender)
+    if not task_id:
+        session = create_upload_session(sender, _chat_id(event), message_id)
+        task_id = session["task_id"]
+    tdir = task_dir(task_id)
+    meta = load_task_meta(tdir)
+    if meta.get("status") in {"running", "ai_review_done", "awaiting_review", "final_exported", "delivered"}:
+        client.reply_text(message_id, "当前任务已开始处理，不能继续追加Confluence来源。请发送“开始信号矩阵对比”新建任务。")
+        return True
+    if parsed.unresolved_urls:
+        client.reply_text(message_id, "无法确定以下网址属于4.0还是5.1，请回复明确格式，例如“4.0页面 <URL>”或“5.1父页面 <URL>”：\n" + "\n".join(parsed.unresolved_urls))
+        return True
+    auto_start = _env_bool("BOT_AUTO_START_WHEN_BOTH_READY", "true")
+    for src in parsed.sources:
+        source = {"version": src.version, "mode": src.mode, "url": src.url, "status": "pending", "page_count": 0, "attachment_count": 0, "downloaded_count": 0, "errors": []}
+        add_source(tdir, source, auto_start=auto_start)
+        update_task_meta(tdir, source="feishu_confluence", input_mode="confluence_url", status="created")
+        client.reply_text(
+            message_id,
+            f"已识别Confluence来源：\n\n版本：{src.version}\n模式：{'递归扫描子页面' if src.mode == 'children_recursive' else '当前页面'}\n网址：{src.url}\n\n正在{'查找子页面及Excel附件' if src.mode == 'children_recursive' else '查询页面附件'}。",
+        )
+        threading.Thread(target=_download_confluence_source, args=(task_id, tdir, source, client, sender), daemon=True).start()
+    return True
+
+
+
+def _handle_retry_confluence(event: dict[str, Any], client: LarkCliClient) -> None:
+    sender = _sender_id(event)
+    message_id = _message_id(event)
+    task_id = get_active_task_id(sender)
+    if not task_id:
+        client.reply_text(message_id, "未找到当前Confluence任务，请先发送Confluence页面地址。")
+        return
+    tdir = task_dir(task_id)
+    data = load_confluence_sources(tdir, task_id)
+    failed = _failed_sources(data)
+    if not failed:
+        client.reply_text(message_id, "当前任务没有失败的Confluence来源需要重试。")
+        return
+    client.reply_text(message_id, f"开始重试 {len(failed)} 个失败的Confluence来源。")
+    for item in failed:
+        update_source(tdir, item.get("url", ""), status="pending", errors=[], downloaded_count=0)
+        source = {**item, "status": "pending", "errors": [], "downloaded_count": 0}
+        threading.Thread(target=_download_confluence_source, args=(task_id, tdir, source, client, sender), daemon=True).start()
+
+
+def _handle_ignore_failed_and_start(event: dict[str, Any], client: LarkCliClient) -> None:
+    sender = _sender_id(event)
+    message_id = _message_id(event)
+    task_id = get_active_task_id(sender)
+    if not task_id:
+        client.reply_text(message_id, "未找到当前Confluence任务，请先发送Confluence页面地址。")
+        return
+    tdir = task_dir(task_id)
+    data = load_confluence_sources(tdir, task_id)
+    failed = _failed_sources(data)
+    if not failed:
+        client.reply_text(message_id, "当前任务没有失败来源，将按正常条件尝试开始处理。")
+    if _start_ready_task(task_id, tdir, client, sender, manual_ignore_failed=True):
+        clear_active_session(sender)
+        client.reply_text(message_id, f"任务 {task_id} 已启动后台处理。处理完成后我会发送人工审核链接。")
+
+def handle_event(event: dict[str, Any], client: LarkCliClient) -> None:
+    message_id = _message_id(event)
+    if not message_id or not _dedupe(message_id):
+        return
+    sender = _sender_id(event)
+    if not _allowed_user(sender):
+        client.reply_text(message_id, "当前飞书用户不在允许名单中，无法发起任务。")
+        return
+    text = _extract_text(event)
+    msg_type = _message_type(event)
+    task_id = get_active_task_id(sender)
+    if task_id:
+        append_bot_event(task_dir(task_id), {"message_id": message_id, "sender_id": sender, "message_type": msg_type, "text": text})
+    if text in START_COMMANDS:
+        _handle_start(event, client)
+        return
+    if text in ADD_40_COMMANDS:
+        _VERSION_HINTS[sender] = "4.0"
+        client.reply_text(message_id, "下一次上传的文件将按 4.0 归类。")
+        return
+    if text in ADD_51_COMMANDS:
+        _VERSION_HINTS[sender] = "5.1"
+        client.reply_text(message_id, "下一次上传的文件将按 5.1 归类。")
+        return
+    if text in RETRY_CONFLUENCE_COMMANDS:
+        _handle_retry_confluence(event, client)
+        return
+    if text in IGNORE_FAILED_CONFLUENCE_COMMANDS:
+        _handle_ignore_failed_and_start(event, client)
+        return
+    if text in PROCESS_COMMANDS:
+        _handle_process(event, client)
+        return
+    if text and _handle_confluence_message(event, client, text):
+        return
+    if msg_type in {"file", "media"} or _extract_file_info(event):
+        _handle_file(event, client)
+        return
+    if text:
+        client.reply_text(message_id, "请发送“开始信号矩阵对比”创建任务，或上传矩阵文件后发送“开始处理”。")
+
+
+def recover_on_start(client: LarkCliClient) -> None:
+    for tdir, meta in scan_task_metas():
+        if meta.get("source") != "feishu":
+            continue
+        if meta.get("status") == "running":
+            update_task_meta(tdir, status="interrupted", error="bot_service 重启后无法确认后台 worker 是否仍在运行。")
+    scan_and_notify(client)
+
+
+def monitor_tasks_loop(client: LarkCliClient, interval_seconds: int = 15) -> None:
+    import time
+
+    while True:
+        for tdir, meta in scan_task_metas():
+            if meta.get("source") != "feishu":
+                continue
+            user_id = meta.get("feishu_sender_id")
+            if user_id and meta.get("status") in {"running", "ai_review_done"}:
+                stage_key = f"{meta.get('current_stage', '')}:{meta.get('stage_progress', '')}:{meta.get('ai_completed_signal_count', '')}:{meta.get('ai_failed_signal_count', '')}"
+                if _LAST_STAGE_NOTICE.get(tdir.name) != stage_key:
+                    _LAST_STAGE_NOTICE[tdir.name] = stage_key
+                    reporter = _REPORTERS.setdefault(tdir.name, ProgressReporter(client, user_id))
+                    reporter.send(
+                        f"任务编号：{tdir.name}\n当前阶段：{meta.get('current_stage', '')}\n"
+                        f"进度：{meta.get('stage_progress', 0)}%\n"
+                        f"当前信号：{meta.get('current_signal', '')}\n"
+                        f"AI进度：{meta.get('ai_completed_signal_count', 0)} / {meta.get('ai_required_signal_count', 0)}，失败：{meta.get('ai_failed_signal_count', 0)}",
+                    )
+        scan_and_notify(client)
+        time.sleep(interval_seconds)
+
+
+def consume_events(client: LarkCliClient) -> None:
+    log.info("开始监听飞书消息事件：<LARK_CLI> event consume im.message.receive_v1 --as bot")
+    proc = client.open_event_consumer()
+
+    def read_stderr() -> None:
+        assert proc.stderr is not None
+        for line in proc.stderr:
+            if line.strip():
+                log.info("[event-consume] %s", line.strip())
+
+    threading.Thread(target=read_stderr, daemon=True).start()
+    if proc.stdin:
+        try:
+            proc.stdin.write("\n")
+            proc.stdin.flush()
+        except OSError:
+            pass
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            log.warning("无法解析事件：%s", line[:200])
+            continue
+        threading.Thread(target=handle_event, args=(event, client), daemon=True).start()
+
+
+def main() -> int:
+    if os.getenv("FEISHU_BOT_ENABLED", "false").lower() != "true":
+        print("FEISHU_BOT_ENABLED=false，飞书机器人未启用。如需启动，请在 .env 或环境变量中设置 FEISHU_BOT_ENABLED=true。", file=sys.stderr)
+        return 2
+    cli_path = os.getenv("LARK_CLI_PATH", "").strip()
+    if not cli_path:
+        print("缺少 LARK_CLI_PATH，请配置 lark-cli 可执行文件路径。", file=sys.stderr)
+        return 2
+    client = LarkCliClient(cli_path)
+    get_task_root().mkdir(parents=True, exist_ok=True)
+    recover_on_start(client)
+    threading.Thread(target=monitor_tasks_loop, args=(client,), daemon=True).start()
+    consume_events(client)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
