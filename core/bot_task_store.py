@@ -69,6 +69,7 @@ def build_review_url(task_id: str, review_token: str, base_url: str | None = Non
 def ensure_feishu_meta(task_path: Path, sender_id: str = "", chat_id: str = "", source_message_id: str = "") -> dict[str, Any]:
     meta = load_task_meta(task_path)
     meta.setdefault("source", "feishu")
+    meta.setdefault("input_mode", "")
     meta.setdefault("feishu_sender_id", sender_id)
     meta.setdefault("feishu_chat_id", chat_id)
     meta.setdefault("feishu_source_message_id", source_message_id)
@@ -85,6 +86,11 @@ def ensure_feishu_meta(task_path: Path, sender_id: str = "", chat_id: str = "", 
     meta.setdefault("notification_status", "pending")
     meta.setdefault("result_delivery_status", "pending")
     meta.setdefault("delivery_error", "")
+    meta.setdefault("confluence_source_count", 0)
+    meta.setdefault("confluence_page_total", 0)
+    meta.setdefault("confluence_page_scanned", 0)
+    meta.setdefault("confluence_attachment_total", 0)
+    meta.setdefault("confluence_downloaded_count", 0)
     save_task_meta(task_path, meta)
     return meta
 

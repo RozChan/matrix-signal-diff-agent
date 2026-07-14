@@ -714,3 +714,175 @@ temp/<task_id>/
 4. 如需消息卡片或原消息更新，需验证对应 lark-cli 快捷命令或 Raw API。
 
 已从脱敏参考脚本和原本地示例确认的模式包括：`event consume im.message.receive_v1`、`im +messages-reply`、`im +messages-send --text/--markdown`、以及 `im +messages-resources-download` 的资源下载结构。
+
+## 飞书机器人 Confluence URL 输入模式
+
+机器人默认输入方式已调整为 `Confluence 页面 URL`。飞书文件上传代码仍保留，但默认关闭：
+
+```env
+BOT_INPUT_MODE=confluence_url
+BOT_ALLOW_FILE_UPLOAD=false
+BOT_AUTO_START_WHEN_BOTH_READY=true
+```
+
+当 `BOT_ALLOW_FILE_UPLOAD=false` 时，用户向机器人发送附件会收到提示：当前阶段请发送 4.0 和 5.1 的 Confluence 页面地址。本地 Streamlit 上传 Excel 的能力不受影响，仍可通过 `start_demo.bat` 使用。
+
+### 用户消息格式
+
+推荐使用明确格式：
+
+```text
+4.0页面 https://yfconfluence.mychery.com/pages/viewpage.action?pageId=xxx
+4.0父页面 https://yfconfluence.mychery.com/pages/viewpage.action?pageId=xxx
+5.1页面 https://yfconfluence.mychery.com/pages/viewpage.action?pageId=yyy
+5.1父页面 https://yfconfluence.mychery.com/pages/viewpage.action?pageId=yyy
+```
+
+也支持一条消息同时提供 4.0 和 5.1 来源，例如：
+
+```text
+4.0父页面：
+https://yfconfluence.mychery.com/xxx
+
+5.1页面：
+https://yfconfluence.mychery.com/yyy
+https://yfconfluence.mychery.com/zzz
+```
+
+解析规则是确定性的，不使用大模型猜测：
+
+- 包含 `4.0` 或 `EEA4.0` -> `version=4.0`；
+- 包含 `5.1` 或 `EEA5.1` -> `version=5.1`；
+- 包含 `父页面`、`子页面`、`下面所有页面`、`所有子页面` -> `children_recursive`；
+- 只写 `页面`、`网址`、`链接` -> `current_page`；
+- 无法判断版本时，机器人会要求用户用 `4.0页面 <URL>` 或 `5.1父页面 <URL>` 重新说明，不会自行归类。
+
+### 当前页面与父页面模式
+
+- `current_page`：只扫描该页面自己的附件；
+- `children_recursive`：递归扫描该父页面所有子孙页面，默认不包含父页面自身附件；如需包含父页面自身附件，设置：
+
+```env
+CONFLUENCE_PARENT_INCLUDE_SELF=true
+```
+
+### Confluence 配置与 PAT 安全
+
+必须通过环境变量配置，不得把 PAT 写入代码、README 或测试数据：
+
+```env
+CONFLUENCE_BASE_URL=https://yfconfluence.mychery.com
+CONFLUENCE_PAT=
+CONFLUENCE_VERIFY_SSL=true
+CONFLUENCE_CA_BUNDLE=
+CONFLUENCE_TIMEOUT_SECONDS=30
+CONFLUENCE_ALLOWED_HOSTS=yfconfluence.mychery.com
+CONFLUENCE_ALLOWED_SPACE_KEYS=
+CONFLUENCE_MAX_PAGES=500
+CONFLUENCE_MAX_ATTACHMENTS=500
+CONFLUENCE_MAX_FILE_SIZE_MB=100
+CONFLUENCE_MAX_TASK_SIZE_MB=1000
+CONFLUENCE_PARENT_INCLUDE_SELF=false
+FEISHU_ALLOWED_OPEN_IDS=
+```
+
+安全限制：
+
+- PAT 只从 `CONFLUENCE_PAT` 读取；
+- 日志不会输出 Authorization Header；
+- `.env` 已被 `.gitignore` 忽略；
+- 只允许访问 `CONFLUENCE_ALLOWED_HOSTS`；
+- 禁止 localhost、127.0.0.1、0.0.0.0、内网 IP、URL 用户名密码和非白名单 Host；
+- 重定向后的 Host 也会重新校验；
+- 可通过 `CONFLUENCE_ALLOWED_SPACE_KEYS` 限制 Space；
+- 可通过 `FEISHU_ALLOWED_OPEN_IDS` 限制允许发起任务的飞书用户。
+
+### Excel 附件发现和下载
+
+机器人只下载当前 pipeline 支持的 Excel：
+
+- `.xlsx`
+- `.xlsm`
+
+不会下载 `.xls`、`.csv`、`.pdf`、`.zip`、图片、Word 或其他文件。附件筛选同时检查文件名后缀、`metadata.mediaType`（如果存在）和文件大小。下载文件会写入：
+
+```text
+temp/<task_id>/input/4.0/
+temp/<task_id>/input/5.1/
+```
+
+不会允许用户指定服务器路径，也不会覆盖项目代码。同名附件会追加附件 ID 或序号避免覆盖。
+
+### 自动开始处理
+
+机器人按 `sender_id + chat_id` 维护当前未开始任务。Confluence 下载完成后，如果同一任务同时满足：
+
+- 4.0 至少下载到 1 个有效 Excel；
+- 5.1 至少下载到 1 个有效 Excel；
+- 所有 Confluence 来源都已完成或失败；
+- `BOT_AUTO_START_WHEN_BOTH_READY=true`；
+
+则自动启动：
+
+```bash
+python -m core.task_worker --task-id <task_id>
+```
+
+如果任务已经进入 `running/awaiting_review/final_exported/delivered`，机器人不允许继续追加 Confluence URL，会提示新建任务。
+
+### Confluence 下载状态文件
+
+每个任务会新增：
+
+```text
+temp/<task_id>/bot/confluence_sources.json
+```
+
+该文件记录来源 URL、版本、模式、解析后的 page_id、扫描页数、发现 Excel 数、已下载数、附件明细和错误信息。`task_meta.json` 也会补充：
+
+- `source=feishu_confluence`
+- `input_mode=confluence_url`
+- `confluence_source_count`
+- `confluence_page_total`
+- `confluence_page_scanned`
+- `confluence_attachment_total`
+- `confluence_downloaded_count`
+
+### Confluence 进度通知
+
+机器人会通知以下阶段，并复用进度节流，避免刷屏：
+
+1. 正在解析 Confluence 页面；
+2. 正在扫描子页面；
+3. 正在读取附件；
+4. 正在下载 Excel；
+5. Confluence 文件准备完成；
+6. 开始信号矩阵对比。
+
+### 本地连接测试
+
+不经过飞书，可在公司工作站执行：
+
+```bash
+python -m core.confluence_client --test-url "https://yfconfluence.mychery.com/pages/viewpage.action?pageId=xxx"
+```
+
+或：
+
+```bash
+python tools/test_confluence_connection.py --test-url "https://yfconfluence.mychery.com/pages/viewpage.action?pageId=xxx"
+```
+
+输出包括 Base URL、是否鉴权成功、解析出的 page_id、页面标题、子页面数量、Excel 附件数量；不会输出 PAT。
+
+### 公司工作站实测重点
+
+需要在公司网络和真实账号权限下验证：
+
+1. PAT 对目标页面和附件是否有权限；
+2. `/rest/api/content/{page_id}/child/page` 子页面分页；
+3. `/rest/api/content/{page_id}/child/attachment` 附件分页；
+4. `_links.download` 附件下载；
+5. display URL、短链接 `/x/...` 的解析；
+6. 飞书消息里 Confluence URL 的实际文本格式；
+7. 文件下载完成后自动启动 worker 和最终回传是否符合预期。
