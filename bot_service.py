@@ -41,7 +41,7 @@ from core.bot_task_store import (
 )
 from core.confluence_client import ConfluenceClient, ConfluenceError
 from core.confluence_source_parser import parse_confluence_sources
-from core.confluence_task_store import add_sources, load_confluence_sources, set_worker_state, task_lock, update_source
+from core.confluence_task_store import add_sources, load_confluence_sources, reset_failed_sources, set_worker_state, task_lock, update_source
 from core.file_intake import detect_version, sanitize_filename, store_received_file, validate_extension
 from core.lark_cli_client import LarkCliClient
 from core.progress_reporter import ProgressReporter
@@ -436,11 +436,7 @@ def _handle_retry_confluence(event: dict[str, Any], client: LarkCliClient) -> No
         client.reply_text(message_id, "未找到当前Confluence任务，请先发送Confluence页面地址。")
         return
     tdir = task_dir(task_id)
-    with task_lock(tdir):
-        data = load_confluence_sources(tdir, task_id)
-        failed = _failed_sources(data)
-        for item in failed:
-            update_source(tdir, item.get("url", ""), status="pending", errors=[], downloaded_count=0)
+    failed = reset_failed_sources(tdir)
     if not failed:
         client.reply_text(message_id, "当前任务没有失败的Confluence来源需要重试。")
         return

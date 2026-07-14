@@ -12,7 +12,7 @@ import pytest
 import bot_service
 from core.bot_task_store import atomic_write_json
 from core.confluence_source_parser import parse_confluence_sources
-from core.confluence_task_store import add_sources, load_confluence_sources, task_lock, update_source
+from core.confluence_task_store import add_sources, load_confluence_sources, reset_failed_sources, task_lock, update_source
 from core.review_store import create_task_meta
 
 REAL_MESSAGE = """4.0页面：https://yfconfluence.mychery.com/spaces/EEA51/pages/109052023/EMS_ICE-V4.9
@@ -67,6 +67,16 @@ def test_unresolved_url_is_not_guessed() -> None:
     assert parsed.unresolved_urls == ["https://yfconfluence.mychery.com/spaces/EEA51/pages/1/X"]
 
 
+def test_trailing_punctuation_is_trimmed_but_query_is_preserved() -> None:
+    parsed = parse_confluence_sources(
+        "4.0页面：https://yfconfluence.mychery.com/spaces/EEA51/pages/109052027/EMS_PHEV+HEV-V2.4?src=contextnavpagetreemode）。"
+    )
+
+    assert parsed.unresolved_urls == []
+    assert len(parsed.sources) == 1
+    assert parsed.sources[0].url == "https://yfconfluence.mychery.com/spaces/EEA51/pages/109052027/EMS_PHEV+HEV-V2.4?src=contextnavpagetreemode"
+
+
 def test_add_sources_registers_four_once(tmp_path: Path) -> None:
     tdir = make_task(tmp_path)
     added = add_sources(tdir, sources(), auto_start=True)
@@ -117,6 +127,21 @@ def test_concurrent_update_source_keeps_all_sources(tmp_path: Path) -> None:
     data = load_confluence_sources(tdir)
     assert len(data["sources"]) == 4
     assert all(item["status"] == "completed" for item in data["sources"])
+
+
+def test_reset_failed_sources_is_single_batch_update(tmp_path: Path) -> None:
+    tdir = make_task(tmp_path)
+    add_sources(tdir, sources(), auto_start=True)
+    update_source(tdir, str(sources()[1]["url"]), status="failed", errors=["first"])
+    update_source(tdir, str(sources()[3]["url"]), status="failed", errors=["second"])
+
+    reset = reset_failed_sources(tdir)
+
+    assert [item["url"] for item in reset] == [sources()[1]["url"], sources()[3]["url"]]
+    data = load_confluence_sources(tdir)
+    assert len(data["sources"]) == 4
+    assert all(item["status"] == "pending" for item in data["sources"])
+    assert all(item["errors"] == [] for item in data["sources"])
 
 
 def test_atomic_write_json_concurrent_parseable_and_unique_temp(tmp_path: Path) -> None:
