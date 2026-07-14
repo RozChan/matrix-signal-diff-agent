@@ -66,8 +66,13 @@ class LarkCliClient:
     def reply_markdown(self, message_id: str, markdown: str) -> bool:
         return self.run_cli("im", "+messages-reply", "--message-id", message_id, "--markdown", markdown, "--as", "bot") is not None
 
-    def send_text(self, user_id: str, text: str) -> str | None:
-        data = self.run_cli("im", "+messages-send", "--user-id", user_id, "--text", text, "--as", "bot", "--format", "json", expect_json=True)
+    def send_text(self, user_id: str | None = None, text: str | None = None, *, chat_id: str | None = None) -> str | None:
+        if not text:
+            raise LarkCliError("缺少飞书消息文本")
+        target_args = _message_target_args(chat_id=chat_id, user_id=user_id)
+        safe_target = "--chat-id" if target_args[0] == "--chat-id" else "--user-id"
+        log.info("send Feishu text via %s", safe_target)
+        data = self.run_cli("im", "+messages-send", *target_args, "--text", text, "--as", "bot", "--format", "json", expect_json=True)
         return _message_id(data)
 
     def send_markdown(self, user_id: str, markdown: str) -> str | None:
@@ -182,9 +187,11 @@ class FakeLarkCliClient:
         self.replies.append({"message_id": message_id, "markdown": markdown})
         return True
 
-    def send_text(self, user_id: str, text: str) -> str:
+    def send_text(self, user_id: str | None = None, text: str | None = None, *, chat_id: str | None = None) -> str:
         msg = f"fake_msg_{len(self.sent)+1}"
-        self.sent.append({"message_id": msg, "user_id": user_id, "text": text})
+        target_args = _message_target_args(chat_id=chat_id, user_id=user_id)
+        target_key = "chat_id" if target_args[0] == "--chat-id" else "user_id"
+        self.sent.append({"message_id": msg, target_key: target_args[1], "text": text})
         return msg
 
     def send_markdown(self, user_id: str, markdown: str) -> str:
@@ -213,3 +220,17 @@ def _message_id(data: Any) -> str | None:
     if not isinstance(data, dict):
         return None
     return data.get("message_id") or data.get("data", {}).get("message_id")
+
+
+def _message_target_args(*, chat_id: str | None = None, user_id: str | None = None) -> list[str]:
+    chat = str(chat_id or "").strip()
+    user = str(user_id or "").strip()
+    if chat:
+        if not chat.startswith("oc_"):
+            raise LarkCliError("非法 feishu_chat_id：chat_id 必须以 oc_ 开头")
+        return ["--chat-id", chat]
+    if user:
+        if not user.startswith("ou_"):
+            raise LarkCliError("非法 feishu_sender_id：user_id 必须以 ou_ 开头")
+        return ["--user-id", user]
+    raise LarkCliError("缺少有效飞书接收目标：需要 oc_ chat_id 或 ou_ user_id")
