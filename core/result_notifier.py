@@ -11,6 +11,7 @@ from typing import Any
 from .bot_task_store import atomic_write_json, bot_dir
 from .bot_task_store import scan_task_metas
 from .confluence_task_store import task_lock
+from .feishu_openapi_client import FeishuOpenAPIClient, FeishuOpenAPIError
 from .final_export import FINAL_REVIEW_FILENAME
 from .lark_cli_client import LarkCliError
 from .pipeline import OUTPUT_FILENAMES
@@ -67,6 +68,25 @@ def _notification_target(meta: dict[str, Any]) -> dict[str, str]:
 def _send_text(client: Any, text: str, meta: dict[str, Any]) -> str | None:
     target = _notification_target(meta)
     return client.send_text(text=text, **target)
+
+
+def _openapi_file_target(meta: dict[str, Any]) -> dict[str, str]:
+    target = _notification_target(meta)
+    if "chat_id" in target:
+        return {"chat_id": target["chat_id"]}
+    return {"open_id": target["user_id"]}
+
+
+def _send_result_file(client: Any, file_path: Path, meta: dict[str, Any]) -> dict[str, str]:
+    mode = os.getenv("FEISHU_FILE_SEND_MODE", "openapi").strip().lower()
+    if mode == "lark_cli":
+        target = _notification_target(meta)
+        message_id = client.send_file(file_path=file_path, timeout=int(os.getenv("FEISHU_FILE_SEND_TIMEOUT_SECONDS", "60")), **target)
+        if not message_id:
+            raise FeishuOpenAPIError("send_message", "lark-cli文件发送失败")
+        return {"file_name": file_path.name, "file_key": "", "message_id": message_id}
+    api = FeishuOpenAPIClient()
+    return api.send_file(file_path, **_openapi_file_target(meta))
 
 
 def _result_failure_fingerprint(task_dir: Path, meta: dict[str, Any], error: str) -> str:
@@ -246,7 +266,10 @@ def _send_result_failure_notice(client: Any, task_dir: Path, meta: dict[str, Any
     try:
         _send_text(
             client,
-            f"最终结果文件发送失败。\n\n任务编号：{current.get('task_id', task_dir.name)}\n原因：{error}\n\n结果文件已保存在服务器，请联系维护人员或使用补发功能。",
+            f"最终结果文件发送失败。\n\n任务编号：{current.get('task_id', task_dir.name)}\n"
+            f"失败阶段：{current.get('result_delivery_failed_stage') or 'send_message'}\n"
+            f"失败文件：{current.get('result_delivery_failed_file') or ''}\n"
+            f"原因：{error}\n\n结果文件仍保存在服务器，可使用补发功能。",
             current,
         )
     except Exception as exc:  # noqa: BLE001
@@ -313,14 +336,17 @@ def deliver_results(client: Any, task_dir: Path, meta: dict[str, Any], *, force:
         )
     try:
         zip_path = build_results_zip(task_dir)
-        _send_text(client, "最终结果已生成，正在发送文件。", current)
-        target = _notification_target(current)
-        timeout_seconds = int(os.getenv("FEISHU_FILE_SEND_TIMEOUT_SECONDS", "120"))
-        final_msg = client.send_file(file_path=final_path, timeout=timeout_seconds, **target)
-        zip_msg = client.send_file(file_path=zip_path, timeout=timeout_seconds, **target)
-        if final_msg and zip_msg:
-            atomic_write_json(bot_dir(task_dir) / "delivery_state.json", {"final_message_id": final_msg, "zip_message_id": zip_msg, "status": "sent"})
-            update_task_meta(task_dir, result_delivery_status="delivered", status="delivered", result_delivered_at=_utc_now_iso(), delivery_error="")
+        _send_text(client, "最终结果已生成，正在上传并发送文件。", current)
+        delivered_files = []
+        for path in [final_path, zip_path]:
+            try:
+                delivered_files.append(_send_result_file(client, path, current))
+            except FeishuOpenAPIError as exc:
+                update_task_meta(task_dir, result_delivery_failed_stage=exc.stage, result_delivery_failed_file=path.name)
+                raise
+        if len(delivered_files) == 2:
+            atomic_write_json(bot_dir(task_dir) / "delivery_state.json", {"delivered_files": delivered_files, "status": "sent"})
+            update_task_meta(task_dir, result_delivery_status="delivered", status="delivered", result_delivered_at=_utc_now_iso(), delivery_error="", delivered_files=delivered_files)
             _send_text(client, f"最终结果文件已发送。\n\n任务编号：{current.get('task_id', task_dir.name)}\n文件名：{FINAL_REVIEW_FILENAME}", current)
             return True
         failed_meta = _mark_result_delivery_failed(task_dir, "飞书文件发送失败")

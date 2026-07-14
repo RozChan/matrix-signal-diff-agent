@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 import threading
 import time
@@ -17,6 +18,8 @@ from core.review_store import create_task_meta, load_task_meta, update_task_meta
 from core.final_export import FINAL_REVIEW_FILENAME
 from core.result_notifier import deliver_results
 from tools import retry_result_delivery, retry_task_notification
+
+os.environ.setdefault("FEISHU_FILE_SEND_MODE", "lark_cli")
 
 
 class RecordingClient:
@@ -385,3 +388,28 @@ def test_result_delivery_force_bypasses_exhaustion(tmp_path: Path) -> None:
     client.task_dir = tdir
     assert deliver_results(client, tdir, load_task_meta(tdir), force=True)
     assert load_task_meta(tdir)["status"] == "delivered"
+
+
+def test_deliver_results_default_openapi_sends_both_files(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("FEISHU_FILE_SEND_MODE", "openapi")
+    tdir = make_task(tmp_path, "openapi_delivery")
+    out = tdir / "output"
+    out.mkdir(exist_ok=True)
+    (out / FINAL_REVIEW_FILENAME).write_bytes(b"excel")
+    update_task_meta(tdir, status="final_exported", result_delivery_status="pending")
+    sent_files = []
+
+    class FakeOpenAPI:
+        def send_file(self, file_path, *, chat_id=None, open_id=None):
+            sent_files.append((Path(file_path).name, chat_id, open_id))
+            return {"file_name": Path(file_path).name, "file_key": f"fk-{len(sent_files)}", "message_id": f"mid-{len(sent_files)}"}
+
+    monkeypatch.setattr("core.result_notifier.FeishuOpenAPIClient", lambda: FakeOpenAPI())
+    client = RecordingClient()
+    client.task_dir = tdir
+    assert deliver_results(client, tdir, load_task_meta(tdir))
+    assert len(sent_files) == 2
+    assert all(item[1] == "oc_chat1" and item[2] is None for item in sent_files)
+    meta = load_task_meta(tdir)
+    assert meta["result_delivery_status"] == "delivered"
+    assert len(meta["delivered_files"]) == 2
