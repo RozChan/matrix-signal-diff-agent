@@ -465,20 +465,29 @@ def acquire_review_lock(task_dir: Path, session_id: str, owner: str = "", *, tak
         if meta.get("review_completed") or meta.get("status") in {"final_exported", "delivered"}:
             raise ReviewLockError("该任务已完成审核，不能继续编辑")
         now = datetime.now(timezone.utc)
+        now_iso = utc_now_iso()
         expires = _parse_time(meta.get("review_lock_expires_at"))
         current_session = str(meta.get("review_session_id") or "")
         locked = meta.get("review_lock_status") == "locked" and expires and expires > now
         if locked and current_session != session_id and not takeover:
             raise ReviewLockError(f"该任务正在由{meta.get('review_owner') or current_session}审核，当前为只读模式")
-        return update_task_meta(
-            task_dir,
-            review_lock_status="locked",
-            review_owner=owner or session_id,
-            review_session_id=session_id,
-            review_locked_at=meta.get("review_locked_at") or utc_now_iso(),
-            review_lock_last_active_at=utc_now_iso(),
-            review_lock_expires_at=(now + timedelta(minutes=_review_lock_minutes())).isoformat(timespec="seconds"),
-        )
+        is_takeover = bool(takeover and current_session and current_session != session_id)
+        lock_started_at = meta.get("review_locked_at") if current_session == session_id and locked else now_iso
+        updates = {
+            "review_lock_status": "locked",
+            "review_owner": owner or session_id,
+            "review_session_id": session_id,
+            "review_locked_at": lock_started_at,
+            "review_lock_last_active_at": now_iso,
+            "review_lock_expires_at": (now + timedelta(minutes=_review_lock_minutes())).isoformat(timespec="seconds"),
+        }
+        if is_takeover:
+            updates.update(
+                review_takeover_at=now_iso,
+                review_takeover_from_session=current_session,
+                review_takeover_to_session=session_id,
+            )
+        return update_task_meta(task_dir, **updates)
 
 
 def heartbeat_review_lock(task_dir: Path, session_id: str) -> dict[str, Any]:
