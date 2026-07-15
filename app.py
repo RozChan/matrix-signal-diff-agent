@@ -5,7 +5,7 @@ import os
 import secrets
 import traceback
 import zipfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
@@ -27,6 +27,8 @@ from core.pipeline import OUTPUT_FILENAMES
 from core.review_store import (
     MANUAL_REVIEW_RESULTS,
     append_review_log,
+    acquire_review_lock,
+    begin_final_generation,
     compute_review_stats,
     create_task_meta,
     generate_review_items_from_excel,
@@ -34,9 +36,12 @@ from core.review_store import (
     load_review_items,
     load_review_state,
     load_task_meta,
+    heartbeat_review_lock,
     is_signal_level_item,
     review_badge,
     review_sort_key,
+    ReviewConflictError,
+    ReviewLockError,
     update_review_item,
     update_task_meta,
 )
@@ -49,8 +54,144 @@ FIELD_FILTERS = ["全部", "信号长度", "精度", "偏移量", "物理最小�
 AI_FILTERS = ["全部", "真实差异", "疑似可忽略", "无法判断", "未启用"]
 REVIEW_SOURCE_FILTERS = ["全部", "需人工优先确认", "系统默认保留", "人工已修改", "待人工确认"]
 MANUAL_STATUS_FILTERS = ["全部", "待人工确认", "已有结论", "人工已修改", "系统默认结论", *MANUAL_REVIEW_RESULTS]
+REVIEW_LOCK_READY_STATUSES = {"awaiting_review", "reviewing"}
 
 
+def _display_text(value: object) -> str:
+    text = "" if value is None else str(value)
+    if text.strip().lower() in {"nan", "none"}:
+        return "<空>"
+    return text if text else "<空>"
+
+
+def _session_id(task_id: str) -> str:
+    key = f"review-session-id-{task_id}"
+    if key not in st.session_state:
+        st.session_state[key] = secrets.token_urlsafe(16)
+    return str(st.session_state[key])
+
+
+def _parse_iso_datetime(value: object) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _is_review_completed(meta: dict) -> bool:
+    return bool(meta.get("review_completed")) or meta.get("status") in {"final_exported", "delivered"}
+
+
+def _lock_is_active_for_other(meta: dict, session_id: str) -> bool:
+    expires = _parse_iso_datetime(meta.get("review_lock_expires_at"))
+    return bool(
+        meta.get("review_lock_status") == "locked"
+        and meta.get("review_session_id")
+        and meta.get("review_session_id") != session_id
+        and expires
+        and expires > datetime.now(timezone.utc)
+    )
+
+
+def _review_lock_state_key(task_id: str, name: str) -> str:
+    return f"review-lock-{name}-{task_id}"
+
+
+def _show_once(task_id: str, name: str, message: str, level: str = "success") -> None:
+    key = _review_lock_state_key(task_id, f"shown-{name}")
+    if st.session_state.get(key):
+        return
+    st.session_state[key] = True
+    getattr(st, level)(message)
+
+
+def _auto_acquire_review_lock(task_dir: Path, task_id: str, session_id: str, meta: dict) -> tuple[bool, dict]:
+    completed = _is_review_completed(meta)
+    if completed or meta.get("status") not in REVIEW_LOCK_READY_STATUSES:
+        st.session_state[_review_lock_state_key(task_id, "acquired")] = False
+        return False, meta
+
+    if meta.get("review_lock_status") == "locked" and meta.get("review_session_id") == session_id:
+        try:
+            meta = heartbeat_review_lock(task_dir, session_id)
+            st.session_state[_review_lock_state_key(task_id, "acquired")] = True
+            return True, meta
+        except ReviewLockError:
+            st.session_state[_review_lock_state_key(task_id, "acquired")] = False
+            return False, load_task_meta(task_dir)
+
+    attempted_key = _review_lock_state_key(task_id, "auto-acquire-attempted")
+    if not st.session_state.get(attempted_key):
+        st.session_state[attempted_key] = True
+        lock_was_expired = bool(
+            meta.get("review_lock_status") == "locked"
+            and meta.get("review_session_id")
+            and meta.get("review_session_id") != session_id
+            and not _lock_is_active_for_other(meta, session_id)
+        )
+        if not _lock_is_active_for_other(meta, session_id):
+            try:
+                meta = acquire_review_lock(task_dir, session_id, owner=session_id)
+                st.session_state[_review_lock_state_key(task_id, "acquired")] = True
+                if lock_was_expired:
+                    _show_once(task_id, "expired-auto-acquired", "原审核锁已过期，当前会话已自动接管审核。", "success")
+                else:
+                    _show_once(task_id, "auto-acquired", "已自动进入审核模式。", "success")
+                return True, meta
+            except ReviewLockError:
+                st.session_state[_review_lock_state_key(task_id, "acquired")] = False
+                return False, load_task_meta(task_dir)
+
+    meta = load_task_meta(task_dir)
+    is_editor = bool(meta.get("review_lock_status") == "locked" and meta.get("review_session_id") == session_id and not _is_review_completed(meta))
+    st.session_state[_review_lock_state_key(task_id, "acquired")] = is_editor
+    return is_editor, meta
+
+
+def _show_review_lock_panel(task_dir: Path, task_id: str, state: dict) -> tuple[bool, str, dict]:
+    session_id = _session_id(task_id)
+    meta = load_task_meta(task_dir)
+    is_editor, meta = _auto_acquire_review_lock(task_dir, task_id, session_id, meta)
+    completed = _is_review_completed(meta)
+    mode = "编辑模式" if is_editor else "只读模式"
+    owner = meta.get("review_owner") or "无"
+    st.info(
+        "｜".join(
+            [
+                f"任务状态：{meta.get('status', '')}",
+                f"当前模式：{mode}",
+                f"当前审核人：{owner}",
+                f"锁定时间：{meta.get('review_locked_at') or '无'}",
+                f"最近活动：{meta.get('review_lock_last_active_at') or '无'}",
+                f"数据 revision：{state.get('revision', 0)}",
+            ]
+        )
+    )
+    if completed:
+        st.success("该任务已完成审核，当前仅支持查看。")
+        return False, session_id, meta
+    if meta.get("status") not in REVIEW_LOCK_READY_STATUSES:
+        st.warning(f"任务当前状态为 {meta.get('status', '') or '未知'}，尚未进入人工审核阶段，当前为只读模式。")
+        return False, session_id, meta
+    if is_editor:
+        return True, session_id, meta
+
+    if _lock_is_active_for_other(meta, session_id):
+        st.warning(f"该任务正在由{owner}审核，当前为只读模式。最近活动时间：{meta.get('review_lock_last_active_at') or '无'}")
+        takeover = st.checkbox("我确认要接管当前审核", key=f"takeover-confirm-{task_id}")
+        if st.button("接管审核", disabled=not takeover, key=f"takeover-review-{task_id}"):
+            try:
+                acquire_review_lock(task_dir, session_id, owner=session_id, takeover=True)
+                st.warning("已接管审核编辑锁。")
+                st.rerun()
+            except ReviewLockError as exc:
+                st.error(str(exc))
+    else:
+        st.warning("当前页面为只读模式；审核锁暂不可用，请刷新页面或稍后重试。")
+    return False, session_id, meta
 
 
 def _review_badge_style(badge: str) -> tuple[str, str, str]:
@@ -390,7 +531,8 @@ def _show_review_workspace() -> None:
     st.header("人工审核工作台")
     st.caption(f"当前 task_id：`{task_id}`")
     if meta:
-        st.caption(f"任务状态：{meta.get('status', '')}；创建时间：{meta.get('created_at', '')}")
+        st.caption(f"创建时间：{meta.get('created_at', '')}")
+    can_edit, session_id, meta = _show_review_lock_panel(task_dir, task_id, state)
 
     stats = compute_review_stats(items, state)
     labels = [
@@ -429,7 +571,7 @@ def _show_review_workspace() -> None:
     st.write(f"当前筛选结果：{len(filtered)} 个信号")
 
     if not filtered:
-        _show_final_export(task_dir, review_dir)
+        _show_final_export(task_dir, review_dir, session_id=session_id, can_edit=can_edit)
         _show_downloads(task_dir)
         return
 
@@ -474,8 +616,11 @@ def _show_review_workspace() -> None:
             with st.expander("查看字段差异明细", expanded=True):
                 for diff in item.get("field_diffs", []):
                     st.markdown(f"**{diff.get('diff_field', '未解析')}**")
-                    st.write(f"4.0内容：{diff.get('value_40', '')}")
-                    st.write(f"5.1内容：{diff.get('value_51', '')}")
+                    left_diff, right_diff = st.columns(2)
+                    left_diff.markdown("4.0内容：")
+                    left_diff.code(_display_text(diff.get("value_40", "")), language="text")
+                    right_diff.markdown("5.1内容：")
+                    right_diff.code(_display_text(diff.get("value_51", "")), language="text")
                     field_type = {"numeric": "数值类", "text": "文本类", "unknown": "未解析"}.get(diff.get("field_type"), "未解析")
                     st.write(f"字段类型：{field_type}")
             with st.expander("查看原始差异点list", expanded=False):
@@ -484,34 +629,40 @@ def _show_review_workspace() -> None:
             current_result = review.get("manual_review_result", "")
             options = [""] + MANUAL_REVIEW_RESULTS
             selected_idx = options.index(current_result) if current_result in options else 0
-            manual_result = st.selectbox("人工审核结果", options, index=selected_idx, format_func=lambda x: x or "未审核", key=f"manual-result-{task_id}-{item_id}")
-            manual_note = st.text_area("人工备注", value=review.get("manual_note", ""), key=f"manual-note-{task_id}-{item_id}")
+            manual_result = st.selectbox("人工审核结果", options, index=selected_idx, format_func=lambda x: x or "未审核", key=f"manual-result-{task_id}-{item_id}", disabled=not can_edit)
+            manual_note = st.text_area("人工备注", value=review.get("manual_note", ""), key=f"manual-note-{task_id}-{item_id}", disabled=not can_edit)
             b1, b2 = st.columns(2)
-            if b1.button("保存当前审核", key=f"save-{task_id}-{item_id}"):
-                update_review_item(review_dir, task_id, item_id, manual_result, manual_note)
-                update_task_meta(task_dir, status="reviewing")
-                st.success("已保存到 review_state.json")
-                st.rerun()
-            if b2.button("保存并下一条", key=f"save-next-{task_id}-{item_id}"):
-                update_review_item(review_dir, task_id, item_id, manual_result, manual_note)
-                update_task_meta(task_dir, status="reviewing")
-                next_index = min(offset, len(filtered) - 1)
-                if filtered:
-                    st.session_state[f"expand-item-{task_id}"] = filtered[next_index]["item_id"]
-                st.success("已保存到 review_state.json")
-                st.rerun()
+            if b1.button("保存当前审核", key=f"save-{task_id}-{item_id}", disabled=not can_edit):
+                try:
+                    update_review_item(review_dir, task_id, item_id, manual_result, manual_note, base_revision=int(state.get("revision") or 0), session_id=session_id)
+                    update_task_meta(task_dir, status="reviewing")
+                    st.success("已保存到 review_state.json")
+                    st.rerun()
+                except (ReviewConflictError, ReviewLockError) as exc:
+                    st.error(str(exc))
+            if b2.button("保存并下一条", key=f"save-next-{task_id}-{item_id}", disabled=not can_edit):
+                try:
+                    update_review_item(review_dir, task_id, item_id, manual_result, manual_note, base_revision=int(state.get("revision") or 0), session_id=session_id)
+                    update_task_meta(task_dir, status="reviewing")
+                    next_index = min(offset, len(filtered) - 1)
+                    if filtered:
+                        st.session_state[f"expand-item-{task_id}"] = filtered[next_index]["item_id"]
+                    st.success("已保存到 review_state.json")
+                    st.rerun()
+                except (ReviewConflictError, ReviewLockError) as exc:
+                    st.error(str(exc))
 
-    _show_batch_actions(task_dir, review_dir, task_id, filtered, state)
-    _show_final_export(task_dir, review_dir)
+    _show_batch_actions(task_dir, review_dir, task_id, filtered, state, can_edit=can_edit, session_id=session_id)
+    _show_final_export(task_dir, review_dir, session_id=session_id, can_edit=can_edit)
     _show_downloads(task_dir)
 
 
-def _show_batch_actions(task_dir: Path, review_dir: Path, task_id: str, filtered: list[dict], state: dict) -> None:
+def _show_batch_actions(task_dir: Path, review_dir: Path, task_id: str, filtered: list[dict], state: dict, *, can_edit: bool, session_id: str) -> None:
     with st.expander("批量操作（可选，谨慎使用）", expanded=False):
         st.warning("批量操作只会作用于当前筛选结果中的“需人工优先确认”且未审核记录，不会批量改动系统默认保留的真实差异。")
-        result = st.selectbox("批量设置结果", ["确认可忽略", "存疑待确认"], key=f"batch-result-{task_id}")
-        confirm = st.checkbox("我确认要批量更新当前筛选结果中的未审核记录", key=f"batch-confirm-{task_id}")
-        if st.button("执行批量更新", disabled=not confirm, key=f"batch-apply-{task_id}"):
+        result = st.selectbox("批量设置结果", ["确认可忽略", "存疑待确认"], key=f"batch-result-{task_id}", disabled=not can_edit)
+        confirm = st.checkbox("我确认要批量更新当前筛选结果中的未审核记录", key=f"batch-confirm-{task_id}", disabled=not can_edit)
+        if st.button("执行批量更新", disabled=(not confirm or not can_edit), key=f"batch-apply-{task_id}"):
             state_items = state.get("items", {})
             count = 0
             for item in filtered:
@@ -519,7 +670,7 @@ def _show_batch_actions(task_dir: Path, review_dir: Path, task_id: str, filtered
                 review = state_items.get(item_id, {})
                 if review.get("reviewed") or review_badge(item, review) != "需人工优先确认":
                     continue
-                update_review_item(review_dir, task_id, item_id, result, "批量操作生成")
+                update_review_item(review_dir, task_id, item_id, result, "批量操作生成", session_id=session_id)
                 count += 1
             try:
                 append_review_log(review_dir, {"task_id": task_id, "action": "batch_update", "manual_review_result": result, "count": count})
@@ -530,18 +681,36 @@ def _show_batch_actions(task_dir: Path, review_dir: Path, task_id: str, filtered
             st.rerun()
 
 
-def _show_final_export(task_dir: Path, review_dir: Path) -> None:
+def _show_final_export(task_dir: Path, review_dir: Path, *, session_id: str, can_edit: bool) -> None:
     st.subheader("生成最终结果")
     final_path = _output_dir(task_dir) / FINAL_REVIEW_FILENAME
-    if st.button("完成审核并生成最终结果", type="primary", key=f"export-final-{task_dir.name}"):
-        stats = export_final_review_result(review_dir / "review_items.json", review_dir / "review_state.json", final_path)
-        meta = load_task_meta(task_dir)
-        updates = {"status": "final_exported"}
-        if meta.get("source") == "feishu":
-            updates["result_delivery_status"] = "pending"
-        update_task_meta(task_dir, **updates)
-        st.success(f"已生成：{final_path}")
-        st.dataframe(pd.DataFrame([{"指标": k, "数量": v} for k, v in stats.items()]), hide_index=True, use_container_width=True)
+    meta = load_task_meta(task_dir)
+    already_done = bool(meta.get("review_completed")) or meta.get("status") in {"final_exported", "delivered"}
+    delivery_active = meta.get("result_delivery_status") in {"sending", "delivered"}
+    disabled = (not can_edit) or already_done or delivery_active
+    if st.button("完成审核并生成最终结果", type="primary", key=f"export-final-{task_dir.name}", disabled=disabled):
+        try:
+            begin_final_generation(task_dir, session_id)
+        except ReviewLockError as exc:
+            st.error(str(exc))
+            return
+        try:
+            stats = export_final_review_result(review_dir / "review_items.json", review_dir / "review_state.json", final_path)
+            meta = load_task_meta(task_dir)
+            updates = {"status": "final_exported", "final_generation_status": "done"}
+            if meta.get("source") in {"feishu", "feishu_confluence"}:
+                updates["result_delivery_status"] = "pending"
+            update_task_meta(task_dir, **updates)
+            st.success(f"已生成：{final_path}")
+            st.dataframe(pd.DataFrame([{"指标": k, "数量": v} for k, v in stats.items()]), hide_index=True, use_container_width=True)
+        except Exception as exc:  # noqa: BLE001
+            update_task_meta(task_dir, review_completed=False, review_completed_at="", final_generation_status="failed", error=str(exc))
+            st.error(f"生成最终结果失败：{exc}")
+            raise
+    if already_done or delivery_active:
+        st.info("该任务已完成审核或正在生成/发送结果，不能重复提交。")
+    elif not can_edit:
+        st.caption("只读模式不能生成最终结果，请先获取审核编辑锁。")
     if final_path.exists():
         st.info(f"最终审核结果文件已存在：{final_path}")
 
