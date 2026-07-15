@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -47,9 +49,37 @@ def new_review_token() -> str:
 
 def atomic_write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(path)
+    payload = json.dumps(data, ensure_ascii=False, indent=2)
+    last_error: PermissionError | None = None
+    for attempt in range(5):
+        tmp_name = ""
+        fd = -1
+        try:
+            fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fd = -1
+                fh.write(payload)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp_name, path)
+            return
+        except PermissionError as exc:
+            last_error = exc
+            if fd >= 0:
+                os.close(fd)
+            if tmp_name:
+                Path(tmp_name).unlink(missing_ok=True)
+            if attempt == 4:
+                raise
+            time.sleep(0.05 * (2**attempt))
+        except Exception:
+            if fd >= 0:
+                os.close(fd)
+            if tmp_name:
+                Path(tmp_name).unlink(missing_ok=True)
+            raise
+    if last_error:
+        raise last_error
 
 
 def read_json(path: Path, default: Any) -> Any:
@@ -74,6 +104,11 @@ def ensure_feishu_meta(task_path: Path, sender_id: str = "", chat_id: str = "", 
     meta.setdefault("feishu_chat_id", chat_id)
     meta.setdefault("feishu_source_message_id", source_message_id)
     meta.setdefault("feishu_progress_message_id", "")
+    meta.setdefault("feishu_progress_last_updated_at", "")
+    meta.setdefault("feishu_progress_last_stage", "")
+    meta.setdefault("feishu_progress_last_percent", 0)
+    meta.setdefault("feishu_progress_last_fingerprint", "")
+    meta.setdefault("feishu_progress_update_error", "")
     meta.setdefault("review_token", "")
     meta.setdefault("review_url", "")
     meta.setdefault("current_stage", "created")
