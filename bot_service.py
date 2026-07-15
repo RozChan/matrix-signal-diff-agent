@@ -45,7 +45,7 @@ from core.confluence_source_parser import parse_confluence_sources
 from core.confluence_task_store import add_sources, load_confluence_sources, set_worker_state, task_lock, update_source
 from core.file_intake import detect_version, sanitize_filename, store_received_file, validate_extension
 from core.lark_cli_client import LarkCliClient
-from core.progress_reporter import ProgressReporter
+from core.progress_card import sync_task_progress_card
 from core.result_notifier import notify_review_ready, notify_task_failed, scan_and_notify
 from core.review_store import load_task_meta, update_task_meta
 
@@ -63,7 +63,6 @@ _PROCESSED_LOCK = threading.Lock()
 _MAX_PROCESSED = 2000
 _VERSION_HINTS: dict[str, str] = {}
 _LAST_STAGE_NOTICE: dict[str, str] = {}
-_REPORTERS: dict[str, ProgressReporter] = {}
 
 
 def _env_bool(name: str, default: str = "false") -> bool:
@@ -236,6 +235,7 @@ def _monitor_worker_completion(task_id: str, tdir: Path, process: subprocess.Pop
     if return_code != 0 and meta.get("status") not in {"failed", "awaiting_review", "final_exported", "delivered"}:
         update_task_meta(tdir, status="failed", current_stage="失败", stage_progress=100, error=f"task_worker退出码非0：{return_code}")
         meta = load_task_meta(tdir)
+    sync_task_progress_card(tdir, client, force=True)
     if meta.get("status") == "awaiting_review":
         notify_review_ready(client, tdir, meta)
     elif meta.get("status") == "failed":
@@ -344,12 +344,11 @@ def _start_ready_task(task_id: str, tdir: Path, client: LarkCliClient, user_id: 
         return False
     set_worker_state(tdir, worker_starting=False, worker_started=True, worker_started_at=_utc_now_iso(), worker_error="")
     update_task_meta(tdir, status="running", current_stage="开始信号矩阵对比", stage_progress=1)
+    sync_task_progress_card(tdir, client, force=True)
     if hasattr(process, "wait"):
         threading.Thread(target=_monitor_worker_completion, args=(task_id, tdir, process, client), daemon=True).start()
     if manual_ignore_failed and failed:
         client.send_text(user_id, f"已按你的确认忽略 {len(failed)} 个失败来源，正在使用已下载Excel开始信号矩阵差异识别。")
-    else:
-        client.send_text(user_id, f"Confluence文件下载完成：\n\n4.0文件：{count40}个\n5.1文件：{count51}个\n\n正在自动开始信号矩阵差异识别。")
     return True
 
 
@@ -395,26 +394,24 @@ def _maybe_auto_start(task_id: str, tdir: Path, client: LarkCliClient, user_id: 
             and load_task_meta(tdir).get("status") not in {"running", "ai_review_done", "awaiting_review", "final_exported", "delivered"}
         )
     if should_notify_complete:
-        source40, count40, source51, count51 = summary
-        client.send_text(user_id, f"Confluence文件下载完成：\n- 4.0来源：{source40}个\n- 4.0 Excel：{count40}个\n- 5.1来源：{source51}个\n- 5.1 Excel：{count51}个")
+        sync_task_progress_card(tdir, client, force=True)
     if should_notify_failed:
         _notify_failed_sources_once(task_id, tdir, client, user_id, _failed_sources(load_confluence_sources(tdir, task_id)))
         return
     if can_auto_start:
         _start_ready_task(task_id, tdir, client, user_id, manual_ignore_failed=False)
     elif should_notify_complete and not _env_bool("BOT_AUTO_START_WHEN_BOTH_READY", "true"):
-        client.send_text(user_id, "请发送“开始处理”。")
+        sync_task_progress_card(tdir, client, force=True)
 
 
 def _download_confluence_source(task_id: str, tdir: Path, source: dict[str, Any], client: LarkCliClient, user_id: str) -> None:
     url = source["url"]
     version = source["version"]
     mode = source["mode"]
-    reporter = _REPORTERS.setdefault(task_id, ProgressReporter(client, user_id))
     try:
         update_source(tdir, url, status="scanning")
         _safe_update_task_meta(tdir, status="created", current_stage=f"解析{version} Confluence页面", stage_progress=3)
-        reporter.send(f"任务编号：{task_id}\n当前阶段：正在解析 Confluence 页面\n版本：{version}\n网址：{url}", force=True)
+        sync_task_progress_card(tdir, client, force=True)
         with ConfluenceClient() as confluence:
             page_id = confluence.resolve_page_id(url)
             update_source(tdir, url, resolved_page_id=page_id, status="scanning")
@@ -422,9 +419,10 @@ def _download_confluence_source(task_id: str, tdir: Path, source: dict[str, Any]
             page_count = 1 if mode == "current_page" else len(confluence.list_descendant_pages(page_id))
             update_source(tdir, url, status="downloading", page_count=page_count, page_scanned=page_count, attachment_count=len(attachments), downloaded_count=0)
             _safe_update_task_meta(tdir, current_stage=f"下载{version} Confluence矩阵", confluence_page_total=page_count, confluence_page_scanned=page_count, confluence_attachment_total=len(attachments))
+            sync_task_progress_card(tdir, client)
             if not attachments:
                 update_source(tdir, url, status="failed", errors=["该页面未发现 .xlsx/.xlsm 附件"], page_count=page_count, attachment_count=0, downloaded_count=0)
-                client.send_text(user_id, f"任务 {task_id}：{version} 来源未发现可用 Excel。\n网址：{url}")
+                sync_task_progress_card(tdir, client, force=True)
                 _maybe_auto_start(task_id, tdir, client, user_id)
                 return
             target_dir = tdir / "input" / version
@@ -442,25 +440,24 @@ def _download_confluence_source(task_id: str, tdir: Path, source: dict[str, Any]
                 downloaded.append(attachment)
                 update_source(tdir, url, downloaded_count=len(downloaded), attachments=downloaded)
                 _safe_update_task_meta(tdir, confluence_downloaded_count=len(downloaded), current_signal="")
-                reporter.send(f"任务编号：{task_id}\n当前阶段：下载{version} Confluence矩阵\n来源页面：1个\n已扫描页面：{page_count} / {page_count}\n发现Excel：{len(attachments)}\n已下载：{index} / {len(attachments)}")
+                sync_task_progress_card(tdir, client)
             try:
                 update_source(tdir, url, status="completed", page_count=page_count, page_scanned=page_count, attachment_count=len(attachments), downloaded_count=len(downloaded), attachments=downloaded, errors=[])
             except Exception as exc:  # noqa: BLE001
                 client.send_text(user_id, f"任务 {task_id} 状态保存失败，已停止自动启动，请人工检查。\n网址：{url}\n错误：{exc}")
                 _safe_update_task_meta(tdir, status="interrupted", current_stage="任务状态保存失败", error=str(exc))
                 return
-            count40, count51 = _count_input_files(tdir)
-            client.send_text(user_id, f"已完成单个 Confluence 来源下载：\n版本：{version}\n模式：{'递归扫描子页面' if mode == 'children_recursive' else '当前页面'}\n网址：{url}\nExcel：{len(downloaded)}个\n当前4.0文件：{count40}个\n当前5.1文件：{count51}个")
+            sync_task_progress_card(tdir, client, force=True)
             _maybe_auto_start(task_id, tdir, client, user_id)
     except ConfluenceError as exc:
         update_source(tdir, url, status="failed", errors=[str(exc)])
         _safe_update_task_meta(tdir, current_stage="Confluence下载失败", error=str(exc))
-        client.send_text(user_id, f"Confluence处理失败：{exc}\n网址：{url}")
+        sync_task_progress_card(tdir, client, force=True)
         _maybe_auto_start(task_id, tdir, client, user_id)
     except Exception as exc:  # noqa: BLE001
         update_source(tdir, url, status="failed", errors=[str(exc)])
         _safe_update_task_meta(tdir, current_stage="Confluence下载失败", error=str(exc))
-        client.send_text(user_id, f"Confluence处理失败：{exc}\n网址：{url}")
+        sync_task_progress_card(tdir, client, force=True)
         _maybe_auto_start(task_id, tdir, client, user_id)
 
 
@@ -485,7 +482,8 @@ def _handle_confluence_message(event: dict[str, Any], client: LarkCliClient, tex
     auto_start = _env_bool("BOT_AUTO_START_WHEN_BOTH_READY", "true")
     sources = [{"version": src.version, "mode": src.mode, "url": src.url, "status": "pending", "page_count": 0, "attachment_count": 0, "downloaded_count": 0, "errors": []} for src in parsed.sources]
     added = add_sources(tdir, sources, auto_start=auto_start)
-    update_task_meta(tdir, source="feishu_confluence", input_mode="confluence_url", status="created")
+    update_task_meta(tdir, source="feishu_confluence", input_mode="confluence_url", status="created", current_stage="已识别Confluence来源", stage_progress=1)
+    sync_task_progress_card(tdir, client, force=True)
     page40 = sum(1 for item in added if item.get("version") == "4.0" and item.get("mode") == "current_page")
     page51 = sum(1 for item in added if item.get("version") == "5.1" and item.get("mode") == "current_page")
     client.reply_text(message_id, f"已识别{len(added)}个Confluence来源：\n- 4.0当前页面：{page40}个\n- 5.1当前页面：{page51}个")
@@ -513,6 +511,7 @@ def _handle_retry_confluence(event: dict[str, Any], client: LarkCliClient) -> No
         client.reply_text(message_id, "当前任务没有失败的Confluence来源需要重试。")
         return
     client.reply_text(message_id, f"开始重试 {len(failed)} 个失败的Confluence来源。")
+    sync_task_progress_card(tdir, client, force=True)
     for item in failed:
         source = {**item, "status": "pending", "errors": [], "downloaded_count": 0}
         threading.Thread(target=_download_confluence_source, args=(task_id, tdir, source, client, sender), daemon=True).start()
@@ -587,6 +586,8 @@ def recover_on_start(client: LarkCliClient) -> None:
             continue
         if meta.get("status") == "running":
             update_task_meta(tdir, status="interrupted", error="bot_service 重启后无法确认后台 worker 是否仍在运行。")
+        if meta.get("status") in {"created", "running", "ai_review_done", "awaiting_review", "failed"}:
+            sync_task_progress_card(tdir, client)
     scan_and_notify(client)
 
 
@@ -597,18 +598,8 @@ def monitor_tasks_loop(client: LarkCliClient, interval_seconds: int = 15) -> Non
         for tdir, meta in scan_task_metas():
             if meta.get("source") not in {"feishu", "feishu_confluence"}:
                 continue
-            user_id = meta.get("feishu_sender_id")
-            if user_id and meta.get("status") in {"running", "ai_review_done"}:
-                stage_key = f"{meta.get('current_stage', '')}:{meta.get('stage_progress', '')}:{meta.get('ai_completed_signal_count', '')}:{meta.get('ai_failed_signal_count', '')}"
-                if _LAST_STAGE_NOTICE.get(tdir.name) != stage_key:
-                    _LAST_STAGE_NOTICE[tdir.name] = stage_key
-                    reporter = _REPORTERS.setdefault(tdir.name, ProgressReporter(client, user_id))
-                    reporter.send(
-                        f"任务编号：{tdir.name}\n当前阶段：{meta.get('current_stage', '')}\n"
-                        f"进度：{meta.get('stage_progress', 0)}%\n"
-                        f"当前信号：{meta.get('current_signal', '')}\n"
-                        f"AI进度：{meta.get('ai_completed_signal_count', 0)} / {meta.get('ai_required_signal_count', 0)}，失败：{meta.get('ai_failed_signal_count', 0)}",
-                    )
+            if meta.get("status") in {"created", "running", "ai_review_done", "awaiting_review", "failed", "final_exported"}:
+                sync_task_progress_card(tdir, client)
         scan_and_notify(client)
         time.sleep(interval_seconds)
 

@@ -41,18 +41,22 @@ class FeishuOpenAPIClient:
         if not self.app_secret:
             raise FeishuOpenAPIError("token", "缺少 FEISHU_APP_SECRET")
 
-    def _post_json(self, path: str, payload: dict[str, Any], *, params: dict[str, str] | None = None, token: str | None = None, timeout: int | None = None) -> dict[str, Any]:
+    def _json_request(self, method: str, path: str, payload: dict[str, Any], *, params: dict[str, str] | None = None, token: str | None = None, timeout: int | None = None, stage: str = "send_message") -> dict[str, Any]:
         headers = {"Content-Type": "application/json; charset=utf-8"}
         if token:
             headers["Authorization"] = f"Bearer {token}"
-        response = self.session.post(f"{self.base_url}{path}", params=params, headers=headers, json=payload, timeout=timeout or self.send_timeout)
+        request = getattr(self.session, method.lower())
+        response = request(f"{self.base_url}{path}", params=params, headers=headers, json=payload, timeout=timeout or self.send_timeout)
         if response.status_code < 200 or response.status_code >= 300:
-            raise FeishuOpenAPIError("send_message", f"HTTP {response.status_code}: {response.text[:500]}")
+            raise FeishuOpenAPIError(stage, f"HTTP {response.status_code}: {response.text[:500]}")
         try:
             data = response.json()
         except ValueError as exc:
-            raise FeishuOpenAPIError("send_message", "飞书返回非JSON内容") from exc
+            raise FeishuOpenAPIError(stage, "飞书返回非JSON内容") from exc
         return data
+
+    def _post_json(self, path: str, payload: dict[str, Any], *, params: dict[str, str] | None = None, token: str | None = None, timeout: int | None = None) -> dict[str, Any]:
+        return self._json_request("post", path, payload, params=params, token=token, timeout=timeout, stage="send_message")
 
     def get_tenant_access_token(self) -> str:
         now = time.time()
@@ -130,6 +134,38 @@ class FeishuOpenAPIClient:
         if not message_id:
             raise FeishuOpenAPIError("send_message", "飞书文件消息响应缺少message_id")
         return message_id
+
+    def send_progress_card(self, card: dict[str, Any], *, chat_id: str | None = None, open_id: str | None = None) -> str:
+        receive_id_type, receive_id = _resolve_receive_target(chat_id=chat_id, open_id=open_id)
+        token = self.get_tenant_access_token()
+        data = self._post_json(
+            "/open-apis/im/v1/messages",
+            {"receive_id": receive_id, "msg_type": "interactive", "content": json.dumps(card, ensure_ascii=False)},
+            params={"receive_id_type": receive_id_type},
+            token=token,
+            timeout=self.send_timeout,
+        )
+        if int(data.get("code") or 0) != 0:
+            raise FeishuOpenAPIError("send_message", f"飞书进度卡片发送失败：code={data.get('code')} msg={data.get('msg') or data.get('message')}")
+        message_id = str((data.get("data") or {}).get("message_id") or data.get("message_id") or "")
+        if not message_id:
+            raise FeishuOpenAPIError("send_message", "飞书进度卡片响应缺少message_id")
+        return message_id
+
+    def update_progress_card(self, message_id: str, card: dict[str, Any]) -> None:
+        if not message_id:
+            raise FeishuOpenAPIError("update_message", "缺少待更新的飞书消息ID")
+        token = self.get_tenant_access_token()
+        data = self._json_request(
+            "patch",
+            f"/open-apis/im/v1/messages/{message_id}",
+            {"msg_type": "interactive", "content": json.dumps(card, ensure_ascii=False)},
+            token=token,
+            timeout=self.send_timeout,
+            stage="update_message",
+        )
+        if int(data.get("code") or 0) != 0:
+            raise FeishuOpenAPIError("update_message", f"飞书进度卡片更新失败：code={data.get('code')} msg={data.get('msg') or data.get('message')}")
 
     def send_text(self, user_id: str | None = None, text: str | None = None, *, chat_id: str | None = None) -> str:
         if not text:

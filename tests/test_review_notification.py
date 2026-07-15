@@ -41,6 +41,13 @@ class RecordingClient:
         self.sent.append((chat_id or user_id or "", f"FILE:{Path(file_path or "").name}:{timeout}"))
         return f"file_{len(self.sent)}"
 
+    def send_progress_card(self, card: dict, *, chat_id: str | None = None, open_id: str | None = None) -> str:
+        self.sent.append((chat_id or open_id or "", "CARD:create"))
+        return "progress_msg"
+
+    def update_progress_card(self, message_id: str, card: dict) -> None:
+        self.sent.append((message_id, "CARD:update"))
+
 
 def make_task(tmp_path: Path, task_id: str = "task_notice") -> Path:
     tdir = tmp_path / task_id
@@ -203,13 +210,13 @@ def test_worker_monitor_runs_wait_in_background(monkeypatch: pytest.MonkeyPatch,
     started_at = time.monotonic()
     assert bot_service._start_ready_task("task_bg", tdir, client, "chat1")
     assert time.monotonic() - started_at < 0.5
-    assert client.sent == [("chat1", "Confluence文件下载完成：\n\n4.0文件：1个\n5.1文件：1个\n\n正在自动开始信号矩阵差异识别。")]
+    assert ("oc_chat1", "CARD:create") in client.sent
+    assert not any("正在自动开始" in message for _, message in client.sent)
     done.set()
     deadline = time.time() + 2
-    while time.time() < deadline and len(client.sent) < 2:
+    while time.time() < deadline and not any("请点击以下链接进入人工审核" in message for _, message in client.sent):
         time.sleep(0.05)
-    assert len(client.sent) == 2
-    assert "请点击以下链接进入人工审核" in client.sent[1][1]
+    assert any("请点击以下链接进入人工审核" in message for _, message in client.sent)
 
 
 def test_failed_notification_does_not_retry_within_backoff(tmp_path: Path) -> None:
