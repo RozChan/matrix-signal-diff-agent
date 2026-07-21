@@ -6,6 +6,7 @@ import argparse
 import ipaddress
 import os
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urljoin, urlparse
@@ -13,6 +14,7 @@ from urllib.parse import parse_qs, quote, unquote, urljoin, urlparse
 import requests
 
 from .file_intake import sanitize_filename
+from .confluence_page_selection import select_latest_version_pages
 
 EXCEL_EXTENSIONS = {".xlsx", ".xlsm"}
 EXCEL_MEDIA_TYPES = {
@@ -185,7 +187,7 @@ class ConfluenceClient:
         raise ConfluenceError("无法从 Confluence URL 解析 page_id")
 
     def get_page(self, page_id: str) -> dict[str, Any]:
-        page = self._api(f"/rest/api/content/{page_id}", {"expand": "space"})
+        page = self._api(f"/rest/api/content/{page_id}", {"expand": "space,ancestors,history,version"})
         self._check_space(page)
         return page
 
@@ -209,8 +211,88 @@ class ConfluenceClient:
             queue.extend(self.list_child_pages(pid))
         return out
 
+    def build_page_tree(self, page_id: str, source_url: str = "") -> dict[str, Any]:
+        """Build a complete, cycle-safe descendant tree with partial errors."""
+
+        root = self.get_page(page_id)
+        queue: deque[tuple[dict[str, Any], str, list[str], int]] = deque([(root, "", [], 0)])
+        visited: set[str] = set()
+        nodes: list[dict[str, Any]] = []
+        errors: list[dict[str, str]] = []
+        while queue:
+            page, parent_id, ancestor_ids, depth = queue.popleft()
+            pid = str(page.get("id") or "")
+            if not pid or pid in visited:
+                continue
+            visited.add(pid)
+            if len(visited) > self.max_pages:
+                raise ConfluenceError(f"超过最大页面遍历数量限制：{self.max_pages}")
+            if depth:
+                try:
+                    page = self.get_page(pid)
+                except ConfluenceError as exc:
+                    errors.append({"page_id": pid, "error": f"页面详情读取失败：{exc}"})
+            try:
+                children = self.list_child_pages(pid)
+            except ConfluenceError as exc:
+                children = []
+                errors.append({"page_id": pid, "error": str(exc)})
+            child_ids = [str(child.get("id") or "") for child in children if child.get("id")]
+            history = page.get("history") or {}
+            version = page.get("version") or {}
+            links = page.get("_links") or {}
+            nodes.append({
+                "page_id": pid,
+                "title": page.get("title", ""),
+                "parent_id": parent_id,
+                "ancestor_ids": list(ancestor_ids),
+                "depth": depth,
+                "web_url": urljoin(self.base_url + "/", str(links.get("webui") or source_url).lstrip("/")),
+                "status": page.get("status", "current"),
+                "created_at": history.get("createdDate", ""),
+                "updated_at": version.get("when", ""),
+                "child_page_ids": child_ids,
+            })
+            for child in children:
+                queue.append((child, pid, [*ancestor_ids, pid], depth + 1))
+        return {"root_page_id": str(page_id), "root_page_url": source_url, "nodes": nodes, "errors": errors}
+
+    def discover_latest_excel_attachments(self, page_id: str, source_url: str = "", *, strict: bool = True) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Discover Excel files only on the latest page selected per module."""
+
+        tree = self.build_page_tree(page_id, source_url)
+        selection = select_latest_version_pages(tree["nodes"], strict=strict)
+        selection.update({"root_page_id": str(page_id), "root_page_url": source_url, "page_tree_errors": tree["errors"]})
+        attachments: list[dict[str, Any]] = []
+        by_name: dict[str, dict[str, Any]] = {}
+        excluded: list[dict[str, Any]] = []
+        selection_by_page = {item["selected_page_id"]: item for item in selection["selections"] if item.get("selected_page_id")}
+        for selected_page_id, selected in selection_by_page.items():
+            page_attachments = self.list_attachments(selected_page_id)
+            for att in page_attachments:
+                reason = _attachment_exclusion_reason(att, self.max_file_size)
+                if reason:
+                    excluded.append({"page_id": selected_page_id, "attachment_id": str(att.get("id") or ""), "attachment_name": att.get("title", ""), "reason": reason})
+                    continue
+                item = _attachment_record(att, selected_page_id, selected.get("selected_page_title", ""), source_url)
+                item.update({"module_key": selected["module_key"], "module_title": selected["module_title"], "selected_version": selected["selected_version_normalized"]})
+                key = str(item["file_name"]).casefold()
+                previous = by_name.get(key)
+                if previous is None or _attachment_version_key(item) > _attachment_version_key(previous):
+                    if previous is not None:
+                        excluded.append({**previous, "reason": "同名附件的旧版本"})
+                    by_name[key] = item
+                else:
+                    excluded.append({**item, "reason": "同名附件的旧版本"})
+        attachments.extend(by_name.values())
+        for selected in selection["selections"]:
+            selected.update({"root_page_id": str(page_id), "root_page_url": source_url})
+            selected["selected_attachments"] = [item for item in attachments if item.get("page_id") == selected.get("selected_page_id")]
+        selection["excluded_attachments"] = excluded
+        return attachments, selection
+
     def list_attachments(self, page_id: str) -> list[dict[str, Any]]:
-        return self._paged(f"/rest/api/content/{page_id}/child/attachment", {"expand": "metadata"}, limit_key="attachments")
+        return self._paged(f"/rest/api/content/{page_id}/child/attachment", {"expand": "metadata,version"}, limit_key="attachments")
 
     def discover_excel_attachments(self, page_id: str, mode: str = "current_page", source_url: str = "") -> list[dict[str, Any]]:
         pages = [self.get_page(page_id)] if mode == "current_page" or self.parent_include_self else []
@@ -345,6 +427,38 @@ def _is_excel_attachment(att: dict[str, Any], max_file_size: int) -> bool:
     if size and size > max_file_size:
         return False
     return True
+
+
+def _attachment_exclusion_reason(att: dict[str, Any], max_file_size: int) -> str:
+    title = str(att.get("title") or "")
+    if title.startswith("~$"):
+        return "Office临时文件"
+    if not _is_excel_attachment(att, max_file_size):
+        return "非有效xlsx/xlsm或超过大小限制"
+    keywords = [part.strip().casefold() for part in os.getenv("CONFLUENCE_ATTACHMENT_EXCLUDE_KEYWORDS", "历史,备份,废弃,作废,old,backup").split(",") if part.strip()]
+    if any(keyword in title.casefold() for keyword in keywords):
+        return "命中排除关键词"
+    return ""
+
+
+def _attachment_record(att: dict[str, Any], page_id: str, page_title: str, source_url: str) -> dict[str, Any]:
+    version = att.get("version") or {}
+    return {
+        "attachment_id": str(att.get("id") or ""),
+        "page_id": page_id,
+        "page_title": page_title,
+        "file_name": att.get("title", ""),
+        "attachment_version": int(version.get("number") or att.get("extensions", {}).get("version") or 0),
+        "attachment_updated_at": version.get("when", ""),
+        "media_type": att.get("metadata", {}).get("mediaType", ""),
+        "file_size": int(att.get("extensions", {}).get("fileSize") or att.get("metadata", {}).get("fileSize") or 0),
+        "download_link": att.get("_links", {}).get("download", ""),
+        "source_url": source_url,
+    }
+
+
+def _attachment_version_key(att: dict[str, Any]) -> tuple[int, str, str]:
+    return (int(att.get("attachment_version") or 0), str(att.get("attachment_updated_at") or ""), str(att.get("attachment_id") or ""))
 
 
 def main() -> int:
