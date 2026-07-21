@@ -6,6 +6,7 @@ import json
 import os
 import secrets
 import tempfile
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +20,8 @@ except Exception:  # noqa: BLE001
     pass
 
 from .review_store import load_task_meta, save_task_meta, update_task_meta
+
+_SESSIONS_LOCK = threading.RLock()
 
 
 def utc_now_iso() -> str:
@@ -149,6 +152,15 @@ def save_sessions(sessions: dict[str, Any], root: Path | None = None) -> None:
     atomic_write_json(sessions_path(root), sessions)
 
 
+def set_active_task_id(sender_id: str, task_id: str, chat_id: str = "", root: Path | None = None) -> None:
+    root = root or get_task_root()
+    with _SESSIONS_LOCK:
+        sessions = load_sessions(root)
+        now = utc_now_iso()
+        sessions[sender_id] = {"task_id": task_id, "chat_id": chat_id, "created_at": now, "updated_at": now}
+        save_sessions(sessions, root)
+
+
 def create_upload_session(sender_id: str, chat_id: str = "", source_message_id: str = "", root: Path | None = None) -> dict[str, Any]:
     root = root or get_task_root()
     tid = new_task_id()
@@ -162,9 +174,7 @@ def create_upload_session(sender_id: str, chat_id: str = "", source_message_id: 
 
     create_task_meta(tdir, tid, status="created")
     ensure_feishu_meta(tdir, sender_id, chat_id, source_message_id)
-    sessions = load_sessions(root)
-    sessions[sender_id] = {"task_id": tid, "chat_id": chat_id, "created_at": utc_now_iso(), "updated_at": utc_now_iso()}
-    save_sessions(sessions, root)
+    set_active_task_id(sender_id, tid, chat_id, root)
     atomic_write_json(bot_dir(tdir) / "received_files.json", [])
     return {"task_id": tid, "task_dir": str(tdir)}
 
@@ -175,9 +185,10 @@ def get_active_task_id(sender_id: str, root: Path | None = None) -> str:
 
 
 def clear_active_session(sender_id: str, root: Path | None = None) -> None:
-    sessions = load_sessions(root)
-    sessions.pop(sender_id, None)
-    save_sessions(sessions, root)
+    with _SESSIONS_LOCK:
+        sessions = load_sessions(root)
+        sessions.pop(sender_id, None)
+        save_sessions(sessions, root)
 
 
 def append_bot_event(task_path: Path, event: dict[str, Any]) -> None:

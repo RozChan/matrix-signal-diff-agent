@@ -698,7 +698,7 @@ def _show_final_export(task_dir: Path, review_dir: Path, *, session_id: str, can
             stats = export_final_review_result(review_dir / "review_items.json", review_dir / "review_state.json", final_path)
             meta = load_task_meta(task_dir)
             updates = {"status": "final_exported", "final_generation_status": "done"}
-            if meta.get("source") in {"feishu", "feishu_confluence"}:
+            if meta.get("source") in {"feishu", "feishu_confluence", "auto_full_compare"}:
                 updates["result_delivery_status"] = "pending"
             update_task_meta(task_dir, **updates)
             st.success(f"已生成：{final_path}")

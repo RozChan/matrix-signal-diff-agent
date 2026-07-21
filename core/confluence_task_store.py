@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .bot_task_store import atomic_write_json, bot_dir, read_json
-from .review_store import update_task_meta
+from .review_store import load_task_meta, update_task_meta
 from .task_lock import get_task_lock
 
 SOURCE_FILE = "confluence_sources.json"
@@ -193,6 +193,28 @@ def _default_data(task_dir: Path, task_id: str | None = None) -> dict[str, Any]:
     }
 
 
+def task_lock(task_dir: Path):
+    return get_task_lock(task_dir)
+
+
+def _default_data(task_dir: Path, task_id: str | None = None) -> dict[str, Any]:
+    return {
+        "task_id": task_id or task_dir.name,
+        "sources": [],
+        "version_40_ready": False,
+        "version_51_ready": False,
+        "auto_start": True,
+        "sources_registration_complete": True,
+        "worker_starting": False,
+        "worker_started": False,
+        "worker_started_at": "",
+        "confluence_failure_notice_status": "pending",
+        "confluence_failure_notice_fingerprint": "",
+        "confluence_failure_notice_sent_at": "",
+        "confluence_failure_notice_error": "",
+    }
+
+
 def source_path(task_dir: Path) -> Path:
     return bot_dir(task_dir) / SOURCE_FILE
 
@@ -208,9 +230,10 @@ def load_confluence_sources(task_dir: Path, task_id: str | None = None) -> dict[
 def save_confluence_sources(task_dir: Path, data: dict[str, Any]) -> None:
     atomic_write_json(source_path(task_dir), data)
     sources = data.get("sources", [])
+    existing_meta = load_task_meta(task_dir)
     update_task_meta(
         task_dir,
-        source="feishu_confluence",
+        source=existing_meta.get("source") or "feishu_confluence",
         input_mode="confluence_url",
         confluence_source_count=len(sources),
         confluence_page_total=sum(int(item.get("page_count") or 0) for item in sources),

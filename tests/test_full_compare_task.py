@@ -1,0 +1,193 @@
+from __future__ import annotations
+
+import threading
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import bot_service
+from core.confluence_client import ConfluenceClient
+from core.confluence_page_selection import classify_page, parse_page_version, select_latest_version_pages
+from core.full_compare_task import FullCompareBusyError, create_full_matrix_compare_task
+from core.review_store import load_task_meta, update_task_meta
+
+
+URL40 = "https://yfconfluence.mychery.com/spaces/X/pages/104890412/R1"
+URL51 = "https://yfconfluence.mychery.com/spaces/X/pages/132350051/R2"
+
+
+def _configure(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FULL_COMPARE_40_PARENT_URL", URL40)
+    monkeypatch.setenv("FULL_COMPARE_51_PARENT_URL", URL51)
+    monkeypatch.setenv("CONFLUENCE_BASE_URL", "https://yfconfluence.mychery.com")
+    monkeypatch.setenv("CONFLUENCE_PAT", "test-pat")
+    monkeypatch.setenv("FULL_COMPARE_MAX_CONCURRENT_TASKS", "1")
+
+
+def _tree() -> list[dict]:
+    nodes = [{"page_id": "root", "title": "矩阵", "parent_id": "", "ancestor_ids": []}]
+    versions = {
+        "EMS_REEV": ["V4.90", "V4.91_"],
+        "FLZCU（VCU）": ["V4.80", "V4.81_", "V4.82"],
+        "PDCS": ["V4.30", "V4.31", "V4.32"],
+    }
+    for index, (module, values) in enumerate(versions.items()):
+        mid = f"m{index}"
+        nodes.append({"page_id": mid, "title": module, "parent_id": "root", "ancestor_ids": ["root"]})
+        for offset, title in enumerate(values):
+            nodes.append({"page_id": f"{mid}v{offset}", "title": title, "parent_id": mid, "ancestor_ids": ["root", mid]})
+    nodes.extend([
+        {"page_id": "evcc", "title": "EVCC-V4.7", "parent_id": "root", "ancestor_ids": ["root"]},
+        {"page_id": "isg", "title": "ISG-V3.7", "parent_id": "root", "ancestor_ids": ["root"]},
+    ])
+    return nodes
+
+
+def test_version_parser_and_classification() -> None:
+    assert parse_page_version("V4.10").version_tuple > parse_page_version("V4.9").version_tuple
+    assert parse_page_version("v4.82（当前）").normalized_version == "V4.82"
+    assert parse_page_version("V4_91_").version_tuple == (4, 91)
+    assert classify_page("EVCC-V4.7") == "direct_versioned_module"
+    assert classify_page("ISG-V3.7") == "direct_versioned_module"
+
+
+def test_latest_versions_are_selected_per_module() -> None:
+    result = select_latest_version_pages(_tree())
+    by_title = {item["module_title"]: item for item in result["selections"]}
+    assert by_title["EMS_REEV"]["selected_page_title"] == "V4.91_"
+    assert by_title["FLZCU（VCU）"]["selected_page_title"] == "V4.82"
+    assert by_title["PDCS"]["selected_page_title"] == "V4.32"
+    assert by_title["EVCC-V4.7"]["selected_page_id"] == "evcc"
+    assert len(by_title["EMS_REEV"]["skipped_pages"]) == 1
+
+
+def test_strict_equal_version_is_ambiguous() -> None:
+    tree = _tree() + [{"page_id": "duplicate", "title": "V4.91", "parent_id": "m0", "ancestor_ids": ["root", "m0"]}]
+    result = select_latest_version_pages(tree, strict=True)
+    ems = next(item for item in result["selections"] if item["module_key"] == "m0")
+    assert result["strict_blocked"] is True
+    assert ems["selected_page_id"] == ""
+    assert ems["warnings"]
+
+
+def test_latest_discovery_only_queries_selected_pages_and_filters_attachments(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = object.__new__(ConfluenceClient)
+    client.max_file_size = 1024 * 1024
+    monkeypatch.setenv("CONFLUENCE_ATTACHMENT_EXCLUDE_KEYWORDS", "历史,backup")
+    client.build_page_tree = lambda page_id, source_url: {"nodes": _tree(), "errors": [], "root_page_id": page_id}
+    queried = []
+
+    def list_attachments(page_id: str):
+        queried.append(page_id)
+        return [
+            {"id": f"{page_id}-new", "title": f"{page_id}.xlsx", "version": {"number": 2}, "extensions": {"fileSize": 10}, "_links": {"download": "/new"}},
+            {"id": f"{page_id}-tmp", "title": "~$temp.xlsx", "extensions": {"fileSize": 10}},
+            {"id": f"{page_id}-old", "title": "矩阵_backup.xlsx", "extensions": {"fileSize": 10}},
+            {"id": f"{page_id}-txt", "title": "notes.txt", "extensions": {"fileSize": 10}},
+        ]
+
+    client.list_attachments = list_attachments
+    attachments, selection = client.discover_latest_excel_attachments("root", "https://example.test/root")
+    assert "m0v0" not in queried  # EMS_REEV historical V4.90
+    assert "m0v1" in queried
+    assert all(item["file_name"].endswith(".xlsx") and not item["file_name"].startswith("~$") for item in attachments)
+    assert len(selection["excluded_attachments"]) == len(queried) * 3
+
+
+def test_same_name_attachment_keeps_highest_confluence_version(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = object.__new__(ConfluenceClient)
+    client.max_file_size = 1024 * 1024
+    tree = [
+        {"page_id": "root", "title": "root", "parent_id": "", "ancestor_ids": []},
+        {"page_id": "module", "title": "EMS", "parent_id": "root", "ancestor_ids": ["root"]},
+        {"page_id": "latest", "title": "V4.2", "parent_id": "module", "ancestor_ids": ["root", "module"]},
+    ]
+    client.build_page_tree = lambda page_id, source_url: {"nodes": tree, "errors": []}
+    client.list_attachments = lambda page_id: [
+        {"id": "old", "title": "matrix.xlsx", "version": {"number": 1}, "extensions": {"fileSize": 10}, "_links": {"download": "/old"}},
+        {"id": "new", "title": "matrix.xlsx", "version": {"number": 3}, "extensions": {"fileSize": 10}, "_links": {"download": "/new"}},
+    ]
+    attachments, selection = client.discover_latest_excel_attachments("root")
+    assert [item["attachment_id"] for item in attachments] == ["new"]
+    assert any(item.get("reason") == "同名附件的旧版本" for item in selection["excluded_attachments"])
+
+
+def test_unified_entry_registers_two_sources_and_is_persistently_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure(monkeypatch)
+    first = create_full_matrix_compare_task("email_auto", "mail-1", "sender@example.com", "user", "ou_notify", root=tmp_path)
+    update_task_meta(first.task_dir, status="awaiting_review")
+    second = create_full_matrix_compare_task("email_auto", "mail-1", "sender@example.com", "user", "ou_notify", root=tmp_path)
+    assert second.duplicate is True
+    assert second.task_id == first.task_id
+    meta = load_task_meta(first.task_dir)
+    assert meta["source"] == "auto_full_compare"
+    assert meta["trigger_source"] == "email_auto"
+    assert len(meta["registered_sources"]) == 2
+    assert (first.task_dir / "bot" / "confluence_sources.json").exists()
+
+
+def test_concurrent_same_trigger_creates_one_task(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure(monkeypatch)
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(create_full_matrix_compare_task("feishu_command", "om_same", "ou_a", "user", "ou_a", root=tmp_path))) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert len({item.task_id for item in results}) == 1
+    assert len(list(tmp_path.glob("*/task_meta.json"))) == 1
+
+
+def test_running_full_compare_blocks_another_trigger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure(monkeypatch)
+    first = create_full_matrix_compare_task("feishu_command", "om_1", "ou_a", "user", "ou_a", root=tmp_path)
+    with pytest.raises(FullCompareBusyError) as exc:
+        create_full_matrix_compare_task("feishu_command", "om_2", "ou_b", "user", "ou_b", root=tmp_path)
+    assert exc.value.task_id == first.task_id
+
+
+class _ReplyClient:
+    def __init__(self) -> None:
+        self.replies = []
+
+    def reply_text(self, message_id: str, text: str) -> None:
+        self.replies.append((message_id, text))
+
+
+def test_full_compare_command_requires_enabled_nonempty_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _ReplyClient()
+    event = {"message_id": "om_1", "sender_id": "ou_a", "content": '{"text":"创建自动全量任务"}'}
+    monkeypatch.setenv("FULL_COMPARE_COMMAND_ENABLED", "false")
+    bot_service.handle_event(event, client)
+    assert "尚未启用" in client.replies[-1][1]
+    monkeypatch.setenv("FULL_COMPARE_COMMAND_ENABLED", "true")
+    monkeypatch.setenv("FULL_COMPARE_ALLOWED_OPEN_IDS", "")
+    bot_service.handle_event({**event, "message_id": "om_2"}, client)
+    assert "白名单" in client.replies[-1][1]
+
+
+def test_exact_command_creates_and_schedules_without_confirmation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure(monkeypatch)
+    monkeypatch.setenv("TASK_ROOT_DIR", str(tmp_path))
+    monkeypatch.setenv("FULL_COMPARE_COMMAND_ENABLED", "true")
+    monkeypatch.setenv("FULL_COMPARE_ALLOWED_OPEN_IDS", "ou_a")
+    monkeypatch.setattr(bot_service, "sync_task_progress_card", lambda *args, **kwargs: True)
+    started = []
+
+    class ImmediateThread:
+        def __init__(self, target, args, daemon):
+            started.append((target, args))
+
+        def start(self):
+            return None
+
+    monkeypatch.setattr(bot_service.threading, "Thread", ImmediateThread)
+    client = _ReplyClient()
+    event = {"message_id": "om_create", "sender_id": "ou_a", "chat_id": "oc_chat", "content": '{"text":"创建自动全量任务"}'}
+    bot_service.handle_event(event, client)
+    assert "已创建自动全量信号对比任务" in client.replies[-1][1]
+    assert len(started) == 2
+    assert all(item[0] is bot_service._download_confluence_source for item in started)

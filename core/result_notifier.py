@@ -48,7 +48,7 @@ def _parse_iso(value: Any) -> datetime | None:
 
 
 def _is_feishu_task(meta: dict[str, Any]) -> bool:
-    return meta.get("source") in {"feishu", "feishu_confluence"}
+    return meta.get("source") in {"feishu", "feishu_confluence", "auto_full_compare"}
 
 
 def _notification_target(meta: dict[str, Any]) -> dict[str, str]:

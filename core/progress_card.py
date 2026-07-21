@@ -74,6 +74,14 @@ def build_task_progress_snapshot(task_dir: Path) -> dict[str, Any]:
         "error": meta.get("error", ""),
         "updated_at": meta.get("updated_at", ""),
         "result_delivery_status": meta.get("result_delivery_status", ""),
+        "source": meta.get("source", ""),
+        "trigger_source": meta.get("trigger_source", ""),
+        "full_compare_40_parent_url": meta.get("full_compare_40_parent_url", ""),
+        "full_compare_51_parent_url": meta.get("full_compare_51_parent_url", ""),
+        "full_compare_module_count": int(meta.get("full_compare_module_count") or 0),
+        "full_compare_selected_page_count": int(meta.get("full_compare_selected_page_count") or 0),
+        "full_compare_skipped_history_count": int(meta.get("full_compare_skipped_history_count") or 0),
+        "full_compare_unrecognized_count": int(meta.get("full_compare_unrecognized_count") or 0),
     }
 
 
@@ -104,6 +112,18 @@ def render_task_progress_text(snapshot: dict[str, Any]) -> str:
         lines.extend(["", "错误信息：", str(snapshot.get("error"))[:1000]])
     if snapshot.get("confluence_failed_source_count"):
         lines.extend(["", "可回复：重试Confluence下载 / 忽略失败来源并开始处理"])
+    if snapshot.get("source") == "auto_full_compare":
+        lines[0] = "自动全量信号差异识别" if snapshot.get("status") != "awaiting_review" else "自动全量信号差异识别已完成"
+        lines.extend([
+            "",
+            "触发方式：飞书命令模拟邮件触发" if snapshot.get("trigger_source") == "feishu_command" else f"触发方式：{snapshot.get('trigger_source', '')}",
+            f"发现模块：{snapshot.get('full_compare_module_count', 0)}个",
+            f"已选择最新版本：{snapshot.get('full_compare_selected_page_count', 0)}个",
+            f"历史版本跳过：{snapshot.get('full_compare_skipped_history_count', 0)}个",
+            f"无法识别：{snapshot.get('full_compare_unrecognized_count', 0)}个",
+            f"4.0父页面：{snapshot.get('full_compare_40_parent_url', '')}",
+            f"5.1父页面：{snapshot.get('full_compare_51_parent_url', '')}",
+        ])
     return "\n".join(lines)
 
 
@@ -142,6 +162,10 @@ def progress_fingerprint(snapshot: dict[str, Any]) -> str:
         "review_url",
         "error",
         "result_delivery_status",
+        "full_compare_module_count",
+        "full_compare_selected_page_count",
+        "full_compare_skipped_history_count",
+        "full_compare_unrecognized_count",
     ]
     raw = {key: snapshot.get(key) for key in keys}
     return hashlib.sha256(json.dumps(raw, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
