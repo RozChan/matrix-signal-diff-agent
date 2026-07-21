@@ -71,6 +71,7 @@ _PROCESSED_LOCK = threading.Lock()
 _MAX_PROCESSED = 2000
 _VERSION_HINTS: dict[str, str] = {}
 _LAST_STAGE_NOTICE: dict[str, str] = {}
+LATEST_SELECTION_SCHEMA_VERSION = 2
 
 
 def _env_bool(name: str, default: str = "false") -> bool:
@@ -284,17 +285,19 @@ def _handle_full_compare_command(event: dict[str, Any], client: LarkCliClient, c
         return
     tdir = result.task_dir
     set_active_task_id(sender, result.task_id, _chat_id(event))
-    sync_task_progress_card(tdir, client, force=not result.duplicate)
+    progress_card_synced = sync_task_progress_card(tdir, client, force=not result.duplicate)
     if result.duplicate:
         client.reply_text(message_id, f"该触发消息已创建过自动全量任务。\n任务编号：{result.task_id}")
         return
+    progress_note = "" if progress_card_synced else "\n\n注意：进度卡片创建失败，任务仍会继续；请检查FEISHU_APP_ID、FEISHU_APP_SECRET和机器人消息权限。"
     client.reply_text(
         message_id,
         "已创建自动全量信号对比任务。\n\n"
         f"任务编号：{result.task_id}\n"
         "4.0来源：26R1通讯矩阵父页面\n"
         "5.1来源：26R2通讯矩阵父页面\n\n"
-        "系统将自动识别各模块最新版本、下载有效信号矩阵并执行差异识别，完成后发送人工审核入口。",
+        "系统将自动识别各模块最新版本、下载有效信号矩阵并执行差异识别，完成后发送人工审核入口。"
+        + progress_note,
     )
     for source in result.sources:
         threading.Thread(target=_download_confluence_source, args=(result.task_id, tdir, dict(source), client, sender), daemon=True).start()
@@ -501,16 +504,18 @@ def _maybe_auto_start(task_id: str, tdir: Path, client: LarkCliClient, user_id: 
             data["all_sources_reported"] = True
             set_worker_state(tdir, **data)
             should_notify_complete = True
+        meta = load_task_meta(tdir)
+        auto_start_enabled = meta.get("source") == "auto_full_compare" or _env_bool("BOT_AUTO_START_WHEN_BOTH_READY", "true")
         can_auto_start = (
             all_completed
             and selections_complete
             and not failed
             and count40 >= 1
             and count51 >= 1
-            and _env_bool("BOT_AUTO_START_WHEN_BOTH_READY", "true")
+            and auto_start_enabled
             and not data.get("worker_starting")
             and not data.get("worker_started")
-            and load_task_meta(tdir).get("status") not in {"running", "ai_review_done", "awaiting_review", "final_exported", "delivered"}
+            and meta.get("status") not in {"running", "ai_review_done", "awaiting_review", "final_exported", "delivered"}
         )
     if should_notify_complete:
         sync_task_progress_card(tdir, client, force=True)
@@ -564,7 +569,7 @@ def _download_confluence_source(task_id: str, tdir: Path, source: dict[str, Any]
                         reasons.append("严格模式下存在版本选择歧义")
                     if selection.get("page_tree_errors"):
                         reasons.append("页面树存在未能读取的节点")
-                    update_source(tdir, url, status="failed", errors=reasons, selection_complete=True, selection_warnings=selection.get("warnings", []))
+                    update_source(tdir, url, status="failed", errors=reasons, selection_complete=True, selection_schema_version=LATEST_SELECTION_SCHEMA_VERSION, selection_warnings=selection.get("warnings", []))
                     sync_task_progress_card(tdir, client, force=True)
                     _maybe_auto_start(task_id, tdir, client, user_id)
                     return
@@ -626,7 +631,7 @@ def _download_confluence_source(task_id: str, tdir: Path, source: dict[str, Any]
             if source.get("select_latest_version"):
                 _merge_version_artifact(tdir, "input_manifest.json", version, {"root_page_url": url, "files": manifest_records, "excluded_attachments": selection.get("excluded_attachments", [])})
             try:
-                update_source(tdir, url, status="completed", selection_complete=True, page_count=page_count, page_scanned=page_count, attachment_count=len(attachments), downloaded_count=len(downloaded), attachments=downloaded, errors=[])
+                update_source(tdir, url, status="completed", selection_complete=True, selection_schema_version=LATEST_SELECTION_SCHEMA_VERSION, page_count=page_count, page_scanned=page_count, attachment_count=len(attachments), downloaded_count=len(downloaded), attachments=downloaded, errors=[])
             except Exception as exc:  # noqa: BLE001
                 client.send_text(user_id, f"任务 {task_id} 状态保存失败，已停止自动启动，请人工检查。\n网址：{url}\n错误：{exc}")
                 _safe_update_task_meta(tdir, status="interrupted", current_stage="任务状态保存失败", error=str(exc))
@@ -793,10 +798,22 @@ def recover_on_start(client: LarkCliClient) -> None:
         if meta.get("source") == "auto_full_compare" and meta.get("status") in {"created", "downloading"}:
             data = load_confluence_sources(tdir, str(meta.get("task_id") or tdir.name))
             resumed = []
+            migrated_selection = False
             for source in data.get("sources", []):
-                if source.get("status") in {"pending", "scanning", "downloading"}:
-                    update_source(tdir, source.get("url", ""), status="pending", errors=[])
-                    resumed.append({**source, "status": "pending", "errors": []})
+                needs_selection_migration = bool(
+                    source.get("select_latest_version")
+                    and int(source.get("selection_schema_version") or 0) < LATEST_SELECTION_SCHEMA_VERSION
+                    and source.get("status") == "completed"
+                )
+                if needs_selection_migration:
+                    migrated_selection = True
+                    for old_input in (tdir / "input" / str(source.get("version"))).glob("*.xls*"):
+                        old_input.unlink(missing_ok=True)
+                if source.get("status") in {"pending", "scanning", "downloading"} or needs_selection_migration:
+                    update_source(tdir, source.get("url", ""), status="pending", errors=[], downloaded_count=0, attachments=[], selection_complete=False)
+                    resumed.append({**source, "status": "pending", "errors": [], "downloaded_count": 0, "attachments": [], "selection_complete": False})
+            if migrated_selection:
+                set_worker_state(tdir, worker_starting=False, worker_started=False, worker_started_at="", worker_error="")
             target = str(meta.get("feishu_sender_id") or meta.get("notify_target") or "")
             for source in resumed:
                 threading.Thread(target=_download_confluence_source, args=(tdir.name, tdir, source, client, target), daemon=True).start()

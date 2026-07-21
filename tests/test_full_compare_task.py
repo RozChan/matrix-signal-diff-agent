@@ -12,6 +12,7 @@ import bot_service
 from core.confluence_client import ConfluenceClient
 from core.confluence_page_selection import classify_page, parse_page_version, select_latest_version_pages
 from core.full_compare_task import FullCompareBusyError, create_full_matrix_compare_task
+from core.confluence_task_store import update_source
 from core.review_store import load_task_meta, update_task_meta
 
 
@@ -42,6 +43,8 @@ def _tree() -> list[dict]:
     nodes.extend([
         {"page_id": "evcc", "title": "EVCC-V4.7", "parent_id": "root", "ancestor_ids": ["root"]},
         {"page_id": "isg", "title": "ISG-V3.7", "parent_id": "root", "ancestor_ids": ["root"]},
+        {"page_id": "hcu", "title": "HCU", "parent_id": "root", "ancestor_ids": ["root"]},
+        {"page_id": "bcm", "title": "BCM", "parent_id": "root", "ancestor_ids": ["root"]},
     ])
     return nodes
 
@@ -61,6 +64,8 @@ def test_latest_versions_are_selected_per_module() -> None:
     assert by_title["FLZCU（VCU）"]["selected_page_title"] == "V4.82"
     assert by_title["PDCS"]["selected_page_title"] == "V4.32"
     assert by_title["EVCC-V4.7"]["selected_page_id"] == "evcc"
+    assert by_title["HCU"]["selection_reason"] == "direct_unversioned_leaf_module"
+    assert by_title["BCM"]["selected_page_id"] == "bcm"
     assert len(by_title["EMS_REEV"]["skipped_pages"]) == 1
 
 
@@ -93,6 +98,7 @@ def test_latest_discovery_only_queries_selected_pages_and_filters_attachments(mo
     attachments, selection = client.discover_latest_excel_attachments("root", "https://example.test/root")
     assert "m0v0" not in queried  # EMS_REEV historical V4.90
     assert "m0v1" in queried
+    assert "hcu" in queried and "bcm" in queried
     assert all(item["file_name"].endswith(".xlsx") and not item["file_name"].startswith("~$") for item in attachments)
     assert len(selection["excluded_attachments"]) == len(queried) * 3
 
@@ -113,6 +119,22 @@ def test_same_name_attachment_keeps_highest_confluence_version(monkeypatch: pyte
     attachments, selection = client.discover_latest_excel_attachments("root")
     assert [item["attachment_id"] for item in attachments] == ["new"]
     assert any(item.get("reason") == "同名附件的旧版本" for item in selection["excluded_attachments"])
+
+
+def test_same_name_on_different_modules_is_not_dropped_before_sha_deduplication() -> None:
+    client = object.__new__(ConfluenceClient)
+    client.max_file_size = 1024 * 1024
+    tree = [
+        {"page_id": "root", "title": "root", "parent_id": "", "ancestor_ids": []},
+        {"page_id": "hcu", "title": "HCU", "parent_id": "root", "ancestor_ids": ["root"]},
+        {"page_id": "pdcs", "title": "PDCS", "parent_id": "root", "ancestor_ids": ["root"]},
+    ]
+    client.build_page_tree = lambda page_id, source_url: {"nodes": tree, "errors": []}
+    client.list_attachments = lambda page_id: [
+        {"id": f"{page_id}-file", "title": "shared.xlsx", "version": {"number": 1}, "extensions": {"fileSize": 10}, "_links": {"download": f"/{page_id}"}},
+    ]
+    attachments, _ = client.discover_latest_excel_attachments("root")
+    assert {(item["page_id"], item["attachment_id"]) for item in attachments} == {("hcu", "hcu-file"), ("pdcs", "pdcs-file")}
 
 
 def test_unified_entry_registers_two_sources_and_is_persistently_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -147,6 +169,47 @@ def test_running_full_compare_blocks_another_trigger(tmp_path: Path, monkeypatch
     with pytest.raises(FullCompareBusyError) as exc:
         create_full_matrix_compare_task("feishu_command", "om_2", "ou_b", "user", "ou_b", root=tmp_path)
     assert exc.value.task_id == first.task_id
+
+
+def test_automatic_full_compare_starts_even_when_manual_autostart_is_disabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure(monkeypatch)
+    monkeypatch.setenv("BOT_AUTO_START_WHEN_BOTH_READY", "false")
+    result = create_full_matrix_compare_task("feishu_command", "om_auto", "ou_a", "user", "ou_a", root=tmp_path)
+    for source in result.sources:
+        update_source(result.task_dir, source["url"], status="completed", selection_complete=True)
+    for version in ("4.0", "5.1"):
+        (result.task_dir / "input" / version / "matrix.xlsx").write_bytes(b"excel")
+    starts = []
+    monkeypatch.setattr(bot_service, "sync_task_progress_card", lambda *args, **kwargs: True)
+    monkeypatch.setattr(bot_service, "_start_ready_task", lambda *args, **kwargs: starts.append(args[0]) or True)
+    bot_service._maybe_auto_start(result.task_id, result.task_dir, _ReplyClient(), "ou_a")
+    assert starts == [result.task_id]
+
+
+def test_restart_redownloads_completed_tasks_created_with_old_selection_schema(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure(monkeypatch)
+    monkeypatch.setenv("TASK_ROOT_DIR", str(tmp_path))
+    result = create_full_matrix_compare_task("feishu_command", "om_old", "ou_a", "user", "ou_a", root=tmp_path)
+    for source in result.sources:
+        update_source(result.task_dir, source["url"], status="completed", selection_complete=True)
+    update_task_meta(result.task_dir, status="downloading")
+    for version in ("4.0", "5.1"):
+        (result.task_dir / "input" / version / "old-selection.xlsx").write_bytes(b"old")
+    resumed = []
+
+    class ImmediateThread:
+        def __init__(self, target, args, daemon):
+            resumed.append(args[2])
+
+        def start(self):
+            return None
+
+    monkeypatch.setattr(bot_service.threading, "Thread", ImmediateThread)
+    monkeypatch.setattr(bot_service, "sync_task_progress_card", lambda *args, **kwargs: True)
+    monkeypatch.setattr(bot_service, "scan_and_notify", lambda *args, **kwargs: None)
+    bot_service.recover_on_start(_ReplyClient())
+    assert {item["version"] for item in resumed} == {"4.0", "5.1"}
+    assert not list((result.task_dir / "input").glob("*/*.xls*"))
 
 
 class _ReplyClient:

@@ -276,7 +276,10 @@ class ConfluenceClient:
                     continue
                 item = _attachment_record(att, selected_page_id, selected.get("selected_page_title", ""), source_url)
                 item.update({"module_key": selected["module_key"], "module_title": selected["module_title"], "selected_version": selected["selected_version_normalized"]})
-                key = str(item["file_name"]).casefold()
+                # Attachment versions are scoped to a page. Files with the
+                # same name on different modules must both be downloaded and
+                # can only be removed later if their SHA-256 is identical.
+                key = f"{selected_page_id}\0{str(item['file_name']).casefold()}"
                 previous = by_name.get(key)
                 if previous is None or _attachment_version_key(item) > _attachment_version_key(previous):
                     if previous is not None:

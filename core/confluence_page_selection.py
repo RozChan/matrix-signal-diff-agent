@@ -91,11 +91,19 @@ def select_latest_version_pages(page_tree: Iterable[dict[str, Any]], *, strict: 
 
     containers = {pid for pid, kind in classifications.items() if kind == "module_container"}
     groups: dict[str, list[tuple[dict[str, Any], VersionInfo]]] = {}
+    direct_unversioned: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
     unclassified: list[dict[str, Any]] = []
     for pid, node in nodes.items():
         kind = classifications[pid]
         if kind not in {"version_page", "direct_versioned_module"}:
+            parent_id = str(node.get("parent_id") or "")
+            parent = nodes.get(parent_id, {})
+            if kind == "unclassified_page" and parent_id and not children.get(pid) and not parent.get("parent_id"):
+                # A leaf directly below the configured release parent is a
+                # current module page even when its title has no Vx.y suffix.
+                direct_unversioned.append(node)
+                continue
             if kind == "unclassified_page" and node.get("parent_id"):
                 unclassified.append({"page_id": pid, "title": node.get("title", ""), "warning": "无法识别页面分类或版本"})
             continue
@@ -158,6 +166,24 @@ def select_latest_version_pages(page_tree: Iterable[dict[str, Any]], *, strict: 
         selections.append(record)
         if warning_messages:
             warnings.append({"module_key": module_key, "module_title": module_node.get("title", ""), "warnings": warning_messages})
+    for node in direct_unversioned:
+        selected_id = str(node.get("page_id") or node.get("id"))
+        selected_ids.add(selected_id)
+        selections.append({
+            "module_key": selected_id,
+            "module_title": node.get("title", ""),
+            "versions_found": [],
+            "selected_page_id": selected_id,
+            "selected_page_title": node.get("title", ""),
+            "selected_version_raw": "",
+            "selected_version_normalized": "",
+            "selected_version_tuple": [],
+            "selection_reason": "direct_unversioned_leaf_module",
+            "selected_page_updated_at": node.get("updated_at", ""),
+            "selected_attachments": [],
+            "skipped_pages": [],
+            "warnings": ["页面标题无版本号，按固定父页面的直接模块叶子页处理"],
+        })
     return {
         "selections": selections,
         "selected_page_ids": sorted(selected_ids),
