@@ -471,6 +471,20 @@ def _monitor_worker_completion(task_id: str, tdir: Path, process: subprocess.Pop
     log.info("worker finished task_id=%s return_code=%s status=%s", task_id, return_code, meta.get("status"))
 
 
+def _monitor_worker_completion(task_id: str, tdir: Path, process: subprocess.Popen, client: LarkCliClient) -> None:
+    return_code = process.wait()
+    meta = load_task_meta(tdir)
+    if return_code != 0 and meta.get("status") not in {"failed", "awaiting_review", "final_exported", "delivered"}:
+        update_task_meta(tdir, status="failed", current_stage="失败", stage_progress=100, error=f"task_worker退出码非0：{return_code}")
+        meta = load_task_meta(tdir)
+    sync_task_progress_card(tdir, client, force=True)
+    if meta.get("status") == "awaiting_review":
+        notify_review_ready(client, tdir, meta)
+    elif meta.get("status") == "failed":
+        notify_task_failed(client, tdir, meta)
+    log.info("worker finished task_id=%s return_code=%s status=%s", task_id, return_code, meta.get("status"))
+
+
 def _handle_process(event: dict[str, Any], client: LarkCliClient) -> None:
     sender = _sender_id(event)
     message_id = _message_id(event)
