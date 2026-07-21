@@ -24,6 +24,10 @@ from core.ai_review import run_ai_review
 from core.final_export import FINAL_REVIEW_FILENAME, export_final_review_result
 from core.llm_client import get_llm_config, test_llm_connection
 from core.pipeline import OUTPUT_FILENAMES
+from core.result_notifier import build_results_zip
+from core.result_access import allowed_result_files, ensure_result_access, result_token_valid
+from core.notification_router import notify_result_ready
+from core.admin_tasks import admin_system_status, admin_token_valid, cancel_admin_task, create_admin_full_compare, list_admin_tasks, retry_admin_confluence, safe_task_dir
 from core.review_store import (
     MANUAL_REVIEW_RESULTS,
     append_review_log,
@@ -698,9 +702,15 @@ def _show_final_export(task_dir: Path, review_dir: Path, *, session_id: str, can
             stats = export_final_review_result(review_dir / "review_items.json", review_dir / "review_state.json", final_path)
             meta = load_task_meta(task_dir)
             updates = {"status": "final_exported", "final_generation_status": "done"}
-            if meta.get("source") in {"feishu", "feishu_confluence", "auto_full_compare"}:
+            if meta.get("notify_type") == "feishu_custom_bot":
+                build_results_zip(task_dir)
+                updates["result_delivery_status"] = "web_ready"
+            elif meta.get("source") in {"feishu", "feishu_confluence", "auto_full_compare"}:
                 updates["result_delivery_status"] = "pending"
             update_task_meta(task_dir, **updates)
+            if meta.get("notify_type") == "feishu_custom_bot":
+                ensure_result_access(task_dir)
+                notify_result_ready(task_dir)
             st.success(f"已生成：{final_path}")
             st.dataframe(pd.DataFrame([{"指标": k, "数量": v} for k, v in stats.items()]), hide_index=True, use_container_width=True)
         except Exception as exc:  # noqa: BLE001
@@ -715,10 +725,97 @@ def _show_final_export(task_dir: Path, review_dir: Path, *, session_id: str, can
         st.info(f"最终审核结果文件已存在：{final_path}")
 
 
+def _show_result_page(task_id: str, token: str) -> None:
+    try:
+        tdir = safe_task_dir(task_id)
+    except (ValueError, FileNotFoundError):
+        st.error("任务不存在或task_id无效。")
+        return
+    if not result_token_valid(tdir, token):
+        st.error("结果下载链接无效或无权访问。")
+        return
+    meta = load_task_meta(tdir)
+    st.title("信号矩阵全量对比结果下载")
+    st.write(f"任务编号：{task_id}")
+    st.write(f"任务状态：{meta.get('status', '')}")
+    if meta.get("status") in {"cancelled", "failed"}:
+        st.warning(f"任务未正常完成：{meta.get('error') or meta.get('current_stage') or ''}")
+        return
+    if meta.get("status") not in {"final_exported", "delivered"}:
+        st.info("最终结果尚未生成。")
+        return
+    files = allowed_result_files(tdir)
+    if not files:
+        st.warning("没有可下载的结果文件。")
+        return
+    for path in files:
+        mime = "application/zip" if path.suffix.lower() == ".zip" else ("application/json" if path.suffix.lower() == ".json" else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button(f"下载 {path.name}", path.read_bytes(), file_name=path.name, mime=mime, key=f"result-{task_id}-{path.name}")
+
+
+def _show_admin_page() -> None:
+    st.title("管理员任务管理")
+    if os.getenv("ADMIN_PAGE_ENABLED", "false").lower() != "true":
+        st.error("管理员页面未启用。")
+        return
+    if not st.session_state.get("admin_authenticated"):
+        token = st.text_input("管理员访问Token", type="password")
+        if st.button("登录管理员页面"):
+            if admin_token_valid(token):
+                st.session_state["admin_authenticated"] = True
+                st.rerun()
+            else:
+                st.error("管理员Token错误。")
+        return
+    status = admin_system_status()
+    st.subheader("系统状态")
+    st.json(status)
+    st.subheader("手动创建全量任务")
+    st.write(f"4.0父页面：{os.getenv('FULL_COMPARE_40_PARENT_URL', '') or '<未配置>'}")
+    st.write(f"5.1父页面：{os.getenv('FULL_COMPARE_51_PARENT_URL', '') or '<未配置>'}")
+    st.write(f"最新版本选择：{os.getenv('CONFLUENCE_PARENT_SELECT_LATEST_VERSION', 'true')}")
+    st.write(f"严格模式：{os.getenv('CONFLUENCE_LATEST_VERSION_STRICT', 'true')}｜通知方式：飞书群自定义机器人")
+    confirm = st.checkbox("确认启动一次4.0与5.1全量信号对比")
+    if "admin_create_operation_id" not in st.session_state:
+        st.session_state["admin_create_operation_id"] = f"admin:{secrets.token_urlsafe(18)}"
+    if st.button("创建自动全量任务", disabled=not confirm):
+        try:
+            result = create_admin_full_compare(st.session_state["admin_create_operation_id"])
+            st.session_state["admin_create_operation_id"] = f"admin:{secrets.token_urlsafe(18)}"
+            st.success(f"任务已创建：{result.task_id}")
+        except Exception as exc:  # noqa: BLE001
+            st.error(str(exc))
+    st.subheader("最近任务")
+    rows = list_admin_tasks()
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    selected = st.selectbox("选择任务进行操作", [row["task_id"] for row in rows] if rows else [])
+    if selected:
+        row = next(item for item in rows if item["task_id"] == selected)
+        st.json(row)
+        c1, c2 = st.columns(2)
+        if c1.button("取消任务", key=f"admin-cancel-{selected}"):
+            st.success("任务已取消。" if cancel_admin_task(selected) else "当前状态无需取消。")
+            st.rerun()
+        if c2.button("重试Confluence下载", key=f"admin-retry-{selected}"):
+            st.success(f"已启动 {retry_admin_confluence(selected)} 个失败来源重试。")
+            st.rerun()
+        if row.get("review_url"):
+            st.link_button("进入人工审核", row["review_url"])
+        if row.get("result_url"):
+            st.link_button("进入结果下载页", row["result_url"])
+
+
 def main() -> None:
     st.set_page_config(page_title="EEA 4.0/5.1 矩阵同一信号差异识别工具", layout="wide")
     st.title("EEA 4.0/5.1 矩阵同一信号差异识别工具")
     st.caption("本地 Streamlit Demo：封装 legacy 脚本流程；AI 复核仅作为人工审核参考，最终以人工审核结果为准。")
+    view = str(st.query_params.get("view", ""))
+    if view == "admin":
+        _show_admin_page()
+        return
+    if view == "results":
+        _show_result_page(str(st.query_params.get("task_id", "")), str(st.query_params.get("result_token", "")))
+        return
     query_task_id = st.query_params.get("task_id", "")
     query_token = st.query_params.get("token", "")
     feishu_link_mode = bool(query_task_id or query_token)

@@ -54,6 +54,7 @@ from core.full_compare_task import (
 )
 from core.lark_cli_client import LarkCliClient
 from core.progress_card import sync_task_progress_card
+from core.notification_router import notify_review_ready as route_review_ready, notify_task_failed as route_task_failed
 from core.result_notifier import notify_review_ready, notify_task_failed, scan_and_notify
 from core.review_store import load_task_meta, update_task_meta
 
@@ -490,9 +491,15 @@ def _monitor_worker_completion(task_id: str, tdir: Path, process: subprocess.Pop
         meta = load_task_meta(tdir)
     sync_task_progress_card(tdir, client, force=True)
     if meta.get("status") == "awaiting_review":
-        notify_review_ready(client, tdir, meta)
+        if meta.get("notify_type") == "feishu_custom_bot":
+            route_review_ready(tdir)
+        else:
+            notify_review_ready(client, tdir, meta)
     elif meta.get("status") == "failed":
-        notify_task_failed(client, tdir, meta)
+        if meta.get("notify_type") == "feishu_custom_bot":
+            route_task_failed(tdir)
+        else:
+            notify_task_failed(client, tdir, meta)
     log.info("worker finished task_id=%s return_code=%s status=%s", task_id, return_code, meta.get("status"))
 
 
@@ -658,7 +665,13 @@ def _maybe_auto_start(task_id: str, tdir: Path, client: LarkCliClient, user_id: 
     if should_notify_complete:
         sync_task_progress_card(tdir, client, force=True)
     if should_notify_failed:
-        _notify_failed_sources_once(task_id, tdir, client, user_id, _failed_sources(load_confluence_sources(tdir, task_id)))
+        current_meta = load_task_meta(tdir)
+        current_failed = _failed_sources(load_confluence_sources(tdir, task_id))
+        if current_meta.get("notify_type") == "feishu_custom_bot":
+            update_task_meta(tdir, status="failed", current_stage="Confluence来源处理失败", error=_format_failed_sources(current_failed))
+            route_task_failed(tdir)
+        else:
+            _notify_failed_sources_once(task_id, tdir, client, user_id, current_failed)
         return
     if can_auto_start:
         _start_ready_task(task_id, tdir, client, user_id, manual_ignore_failed=False)
@@ -1020,8 +1033,9 @@ def consume_events(client: LarkCliClient) -> None:
 
 
 def main() -> int:
-    if os.getenv("FEISHU_BOT_ENABLED", "false").lower() != "true":
-        print("FEISHU_BOT_ENABLED=false，飞书机器人未启用。如需启动，请在 .env 或环境变量中设置 FEISHU_BOT_ENABLED=true。", file=sys.stderr)
+    enterprise_enabled = os.getenv("FEISHU_ENTERPRISE_BOT_ENABLED", os.getenv("FEISHU_BOT_ENABLED", "false")).lower() == "true"
+    if not enterprise_enabled:
+        print("FEISHU_ENTERPRISE_BOT_ENABLED=false，飞书企业应用机器人未启用。", file=sys.stderr)
         return 2
     cli_path = os.getenv("LARK_CLI_PATH", "").strip()
     if not cli_path:

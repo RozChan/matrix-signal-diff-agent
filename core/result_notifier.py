@@ -48,6 +48,8 @@ def _parse_iso(value: Any) -> datetime | None:
 
 
 def _is_feishu_task(meta: dict[str, Any]) -> bool:
+    if meta.get("notify_type") == "feishu_custom_bot":
+        return False
     return meta.get("source") in {"feishu", "feishu_confluence", "auto_full_compare"}
 
 

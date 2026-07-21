@@ -236,6 +236,8 @@ def sync_task_progress_card(task_dir: Path, client: Any | None = None, *, force:
     tdir = Path(task_dir)
     with task_lock(tdir):
         meta = load_task_meta(tdir)
+        if meta.get("notify_type") == "feishu_custom_bot":
+            return False
         if meta.get("status") in NO_CREATE_STATUSES and not meta.get("feishu_progress_message_id"):
             return False
         snapshot = build_task_progress_snapshot(tdir)
