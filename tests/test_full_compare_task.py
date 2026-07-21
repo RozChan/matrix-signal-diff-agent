@@ -9,6 +9,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import bot_service
+from core.bot_task_store import set_active_task_id
 from core.confluence_client import ConfluenceClient
 from core.confluence_page_selection import classify_page, parse_page_version, select_latest_version_pages
 from core.full_compare_task import FullCompareBusyError, create_full_matrix_compare_task
@@ -210,6 +211,37 @@ def test_restart_redownloads_completed_tasks_created_with_old_selection_schema(t
     bot_service.recover_on_start(_ReplyClient())
     assert {item["version"] for item in resumed} == {"4.0", "5.1"}
     assert not list((result.task_dir / "input").glob("*/*.xls*"))
+
+
+def test_cancel_command_marks_task_cancelled_and_terminates_worker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure(monkeypatch)
+    monkeypatch.setenv("TASK_ROOT_DIR", str(tmp_path))
+    result = create_full_matrix_compare_task("feishu_command", "om_running", "ou_a", "user", "ou_a", root=tmp_path)
+    set_active_task_id("ou_a", result.task_id, "oc_chat", tmp_path)
+    update_task_meta(result.task_dir, status="running", worker_pid=0)
+
+    class FakeProcess:
+        pid = 0
+
+        def __init__(self):
+            self.terminated = 0
+
+        def terminate(self):
+            self.terminated += 1
+
+    process = FakeProcess()
+    bot_service._WORKER_PROCESSES[result.task_id] = process
+    monkeypatch.setattr(bot_service, "sync_task_progress_card", lambda *args, **kwargs: True)
+    client = _ReplyClient()
+    bot_service.handle_event(
+        {"message_id": "om_cancel", "sender_id": "ou_a", "chat_id": "oc_chat", "content": '{"text":"取消自动全量任务"}'},
+        client,
+    )
+    meta = load_task_meta(result.task_dir)
+    assert meta["status"] == "cancelled"
+    assert meta["current_stage"] == "已取消"
+    assert process.terminated == 1
+    assert "已取消自动全量任务" in client.replies[-1][1]
 
 
 class _ReplyClient:

@@ -132,6 +132,8 @@ def render_task_progress_card(snapshot: dict[str, Any]) -> dict[str, Any]:
     status = str(snapshot.get("status") or "处理中")
     if status == "awaiting_review":
         title = "信号矩阵差异识别已完成"
+    elif status == "cancelled":
+        title = "任务已取消"
     elif status == "failed":
         title = "任务处理失败"
     elif status == "delivered":

@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import hashlib
+import signal
 import subprocess
 import sys
 import tempfile
@@ -64,6 +65,7 @@ PROCESS_COMMANDS = {"开始处理", "开始识别", "开始"}
 RETRY_CONFLUENCE_COMMANDS = {"重试Confluence下载", "重试confluence下载", "重试下载"}
 IGNORE_FAILED_CONFLUENCE_COMMANDS = {"忽略失败来源并开始处理", "忽略失败并开始处理"}
 FULL_COMPARE_COMMANDS = {"创建自动全量任务", "全量信号对比", "开始全量信号对比", "执行全量信号自动对比"}
+CANCEL_FULL_COMPARE_COMMANDS = {"取消自动全量任务", "取消当前自动全量任务"}
 ADD_40_COMMANDS = {"添加4.0文件", "上传4.0", "4.0"}
 ADD_51_COMMANDS = {"添加5.1文件", "上传5.1", "5.1"}
 _PROCESSED: set[str] = set()
@@ -72,6 +74,8 @@ _MAX_PROCESSED = 2000
 _VERSION_HINTS: dict[str, str] = {}
 _LAST_STAGE_NOTICE: dict[str, str] = {}
 LATEST_SELECTION_SCHEMA_VERSION = 2
+_WORKER_PROCESSES: dict[str, subprocess.Popen] = {}
+_WORKER_PROCESSES_LOCK = threading.RLock()
 
 
 def _env_bool(name: str, default: str = "false") -> bool:
@@ -255,6 +259,66 @@ def _safe_update_task_meta(tdir: Path, **updates: Any) -> bool:
         return False
 
 
+def _task_cancelled(tdir: Path) -> bool:
+    return load_task_meta(tdir).get("status") == "cancelled"
+
+
+def _find_worker_pids(task_id: str) -> list[int]:
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", task_id or ""):
+        return []
+    if os.name == "nt":
+        script = (
+            "Get-CimInstance Win32_Process | "
+            f"Where-Object {{ $_.CommandLine -like '*core.task_worker*' -and $_.CommandLine -like '*{task_id}*' }} | "
+            "Select-Object -ExpandProperty ProcessId"
+        )
+        result = subprocess.run(["powershell", "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=15, check=False)
+        return [int(line.strip()) for line in result.stdout.splitlines() if line.strip().isdigit()]
+    found = []
+    for command_path in Path("/proc").glob("[0-9]*/cmdline"):
+        try:
+            command = command_path.read_bytes().replace(b"\0", b" ").decode("utf-8", errors="ignore")
+        except OSError:
+            continue
+        if "core.task_worker" in command and task_id in command:
+            found.append(int(command_path.parent.name))
+    return found
+
+
+def _terminate_process_tree(process: subprocess.Popen | None, worker_pid: int = 0, *, task_id: str = "", process_group: bool = False) -> None:
+    pid = int(getattr(process, "pid", 0) or worker_pid or 0)
+    pids = [pid] if pid else _find_worker_pids(task_id)
+    if not pids:
+        if process is not None and hasattr(process, "terminate"):
+            process.terminate()
+        return
+    if os.name == "nt":
+        for candidate_pid in pids:
+            subprocess.run(["taskkill", "/PID", str(candidate_pid), "/T", "/F"], capture_output=True, text=True, timeout=15, check=False)
+        return
+    if not process_group:
+        for candidate_pid in pids:
+            try:
+                os.kill(candidate_pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        return
+    try:
+        os.killpg(os.getpgid(pid), signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    if process is not None:
+        try:
+            process.wait(timeout=5)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+    try:
+        os.killpg(os.getpgid(pid), signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
 def _handle_start(event: dict[str, Any], client: LarkCliClient) -> None:
     sender = _sender_id(event)
     message_id = _message_id(event)
@@ -303,6 +367,45 @@ def _handle_full_compare_command(event: dict[str, Any], client: LarkCliClient, c
         threading.Thread(target=_download_confluence_source, args=(result.task_id, tdir, dict(source), client, sender), daemon=True).start()
 
 
+def _handle_cancel_full_compare(event: dict[str, Any], client: LarkCliClient) -> None:
+    message_id = _message_id(event)
+    sender = _sender_id(event)
+    task_id = get_active_task_id(sender)
+    if not task_id:
+        client.reply_text(message_id, "没有找到当前自动全量任务。")
+        return
+    tdir = task_dir(task_id)
+    with task_lock(tdir):
+        meta = load_task_meta(tdir)
+        if meta.get("source") != "auto_full_compare":
+            client.reply_text(message_id, "当前会话关联的不是自动全量任务，未执行取消。")
+            return
+        if meta.get("status") in {"cancelled", "failed", "awaiting_review", "final_exported", "delivered"}:
+            client.reply_text(message_id, f"任务 {task_id} 当前状态为 {meta.get('status')}，无需取消。")
+            return
+        update_task_meta(
+            tdir,
+            status="cancelled",
+            current_stage="已取消",
+            error="用户通过飞书命令取消任务",
+            cancelled_at=_utc_now_iso(),
+            cancelled_by=sender,
+        )
+        set_worker_state(tdir, worker_starting=False, worker_started=False, worker_error="任务已取消")
+        worker_pid = int(meta.get("worker_pid") or 0)
+    with _WORKER_PROCESSES_LOCK:
+        process = _WORKER_PROCESSES.pop(task_id, None)
+    try:
+        _terminate_process_tree(process, worker_pid, task_id=task_id, process_group=bool(meta.get("worker_process_group")))
+    except Exception as exc:  # noqa: BLE001
+        update_task_meta(tdir, cancellation_error=str(exc))
+        client.reply_text(message_id, f"任务 {task_id} 已标记为取消，但终止后台进程失败：{exc}\n请在服务器上人工停止对应task_worker进程。")
+        return
+    clear_active_session(sender)
+    sync_task_progress_card(tdir, client, force=True)
+    client.reply_text(message_id, f"已取消自动全量任务。\n\n任务编号：{task_id}\n已停止后续下载、差异识别和AI复核。")
+
+
 def _handle_file(event: dict[str, Any], client: LarkCliClient) -> None:
     if not _env_bool("BOT_ALLOW_FILE_UPLOAD", "false"):
         client.reply_text(_message_id(event), "当前任务暂时使用Confluence网址作为输入，请发送4.0和5.1的Confluence页面地址。")
@@ -344,7 +447,28 @@ def _start_worker(task_id: str, enable_ai: bool = True) -> subprocess.Popen:
     if not enable_ai:
         args.append("--disable-ai")
     log.info("start worker: %s", " ".join(args))
-    return subprocess.Popen(args, cwd=Path(__file__).resolve().parent, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    kwargs: dict[str, Any] = {"cwd": Path(__file__).resolve().parent, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kwargs["start_new_session"] = True
+    return subprocess.Popen(args, **kwargs)
+
+
+def _monitor_worker_completion(task_id: str, tdir: Path, process: subprocess.Popen, client: LarkCliClient) -> None:
+    return_code = process.wait()
+    with _WORKER_PROCESSES_LOCK:
+        _WORKER_PROCESSES.pop(task_id, None)
+    meta = load_task_meta(tdir)
+    if return_code != 0 and meta.get("status") not in {"cancelled", "failed", "awaiting_review", "final_exported", "delivered"}:
+        update_task_meta(tdir, status="failed", current_stage="失败", stage_progress=100, error=f"task_worker退出码非0：{return_code}")
+        meta = load_task_meta(tdir)
+    sync_task_progress_card(tdir, client, force=True)
+    if meta.get("status") == "awaiting_review":
+        notify_review_ready(client, tdir, meta)
+    elif meta.get("status") == "failed":
+        notify_task_failed(client, tdir, meta)
+    log.info("worker finished task_id=%s return_code=%s status=%s", task_id, return_code, meta.get("status"))
 
 
 def _monitor_worker_completion(task_id: str, tdir: Path, process: subprocess.Popen, client: LarkCliClient) -> None:
@@ -433,7 +557,7 @@ def _notify_failed_sources_once(task_id: str, tdir: Path, client: LarkCliClient,
 def _start_ready_task(task_id: str, tdir: Path, client: LarkCliClient, user_id: str, *, manual_ignore_failed: bool = False) -> bool:
     with task_lock(tdir):
         meta = load_task_meta(tdir)
-        if meta.get("status") in {"running", "ai_review_done", "awaiting_review", "final_exported", "delivered"}:
+        if meta.get("status") in {"cancelled", "running", "ai_review_done", "awaiting_review", "final_exported", "delivered"}:
             return False
         count40, count51 = _count_input_files(tdir)
         update_task_meta(tdir, input_40_count=count40, input_51_count=count51)
@@ -462,8 +586,11 @@ def _start_ready_task(task_id: str, tdir: Path, client: LarkCliClient, user_id: 
         update_task_meta(tdir, error=str(exc))
         client.send_text(user_id, f"任务 {task_id} 启动后台处理失败：{exc}")
         return False
-    set_worker_state(tdir, worker_starting=False, worker_started=True, worker_started_at=_utc_now_iso(), worker_error="")
-    update_task_meta(tdir, status="running", current_stage="开始信号矩阵对比", stage_progress=1)
+    with _WORKER_PROCESSES_LOCK:
+        _WORKER_PROCESSES[task_id] = process
+    worker_pid = int(getattr(process, "pid", 0) or 0)
+    set_worker_state(tdir, worker_starting=False, worker_started=True, worker_started_at=_utc_now_iso(), worker_pid=worker_pid, worker_process_group=True, worker_error="")
+    update_task_meta(tdir, status="running", current_stage="开始信号矩阵对比", stage_progress=1, worker_pid=worker_pid, worker_process_group=True)
     sync_task_progress_card(tdir, client, force=True)
     if hasattr(process, "wait"):
         threading.Thread(target=_monitor_worker_completion, args=(task_id, tdir, process, client), daemon=True).start()
@@ -533,10 +660,16 @@ def _download_confluence_source(task_id: str, tdir: Path, source: dict[str, Any]
     version = source["version"]
     mode = source["mode"]
     try:
+        if _task_cancelled(tdir):
+            update_source(tdir, url, status="cancelled", errors=["任务已取消"])
+            return
         update_source(tdir, url, status="scanning")
         _safe_update_task_meta(tdir, status="created", current_stage=f"解析{version} Confluence页面", stage_progress=3)
         sync_task_progress_card(tdir, client, force=True)
         with ConfluenceClient() as confluence:
+            if _task_cancelled(tdir):
+                update_source(tdir, url, status="cancelled", errors=["任务已取消"])
+                return
             page_id = confluence.resolve_page_id(url)
             update_source(tdir, url, resolved_page_id=page_id, status="scanning")
             selection: dict[str, Any] = {}
@@ -590,6 +723,9 @@ def _download_confluence_source(task_id: str, tdir: Path, source: dict[str, Any]
             known_hashes = _existing_input_hashes(tdir, version)
             manifest_records: list[dict[str, Any]] = []
             for index, attachment in enumerate(attachments, start=1):
+                if _task_cancelled(tdir):
+                    update_source(tdir, url, status="cancelled", errors=["任务已取消"], downloaded_count=len(downloaded), attachments=downloaded)
+                    return
                 aid = attachment.get("attachment_id", "")
                 if aid and aid in seen_ids:
                     continue
@@ -742,6 +878,9 @@ def handle_event(event: dict[str, Any], client: LarkCliClient) -> None:
             return
         sender = _sender_id(event)
         text = _extract_text(event)
+        if text in CANCEL_FULL_COMPARE_COMMANDS:
+            _handle_cancel_full_compare(event, client)
+            return
         if text in FULL_COMPARE_COMMANDS:
             _handle_full_compare_command(event, client, text)
             return
