@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import ipaddress
 import os
+import tempfile
 import time
 from collections import deque
 from pathlib import Path
@@ -277,8 +279,8 @@ class ConfluenceClient:
                 item = _attachment_record(att, selected_page_id, selected.get("selected_page_title", ""), source_url)
                 item.update({"module_key": selected["module_key"], "module_title": selected["module_title"], "selected_version": selected["selected_version_normalized"]})
                 # Attachment versions are scoped to a page. Files with the
-                # same name on different modules must both be downloaded and
-                # can only be removed later if their SHA-256 is identical.
+                # same name on different modules must both be downloaded;
+                # SHA-256 is audit metadata and never removes a business source.
                 key = f"{selected_page_id}\0{str(item['file_name']).casefold()}"
                 previous = by_name.get(key)
                 if previous is None or _attachment_version_key(item) > _attachment_version_key(previous):
@@ -332,32 +334,29 @@ class ConfluenceClient:
         if not download_link:
             raise ConfluenceError(f"附件缺少下载链接：{attachment.get('file_name', '')}")
         url = urljoin(self.base_url + "/", str(download_link).lstrip("/"))
-        file_name = sanitize_filename(attachment.get("file_name") or "attachment.xlsx")
+        file_name = attachment_local_filename(attachment)
         target_dir.mkdir(parents=True, exist_ok=True)
         target = target_dir / file_name
-        if target.exists():
-            stem = target.stem
-            suffix = target.suffix
-            aid = str(attachment.get("attachment_id") or attachment.get("page_id") or "dup")[:12]
-            target = target_dir / f"{stem}_{aid}{suffix}"
-            index = 1
-            while target.exists():
-                target = target_dir / f"{stem}_{aid}_{index}{suffix}"
-                index += 1
         response = self._request("GET", url, stream=True)
         total = int(response.headers.get("Content-Length") or 0)
         if total and total > self.max_file_size:
             raise ConfluenceError(f"附件超过大小限制：{file_name}")
         written = 0
-        with target.open("wb") as fh:
-            for chunk in response.iter_content(chunk_size=1024 * 1024):
-                if not chunk:
-                    continue
-                written += len(chunk)
-                if written > self.max_file_size:
-                    target.unlink(missing_ok=True)
-                    raise ConfluenceError(f"附件超过大小限制：{file_name}")
-                fh.write(chunk)
+        fd, tmp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".download", dir=target_dir)
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if not chunk:
+                        continue
+                    written += len(chunk)
+                    if written > self.max_file_size:
+                        raise ConfluenceError(f"附件超过大小限制：{file_name}")
+                    fh.write(chunk)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp_name, target)
+        finally:
+            Path(tmp_name).unlink(missing_ok=True)
         return target
 
     def test_connection(self, test_url: str | None = None) -> dict[str, Any]:
@@ -462,6 +461,38 @@ def _attachment_record(att: dict[str, Any], page_id: str, page_title: str, sourc
 
 def _attachment_version_key(att: dict[str, Any]) -> tuple[int, str, str]:
     return (int(att.get("attachment_version") or 0), str(att.get("attachment_updated_at") or ""), str(att.get("attachment_id") or ""))
+
+
+def attachment_local_filename(attachment: dict[str, Any]) -> str:
+    """Return a readable, deterministic filename for one attachment identity."""
+
+    original = sanitize_filename(str(attachment.get("file_name") or "attachment.xlsx"))
+    suffix = Path(original).suffix.lower() or ".xlsx"
+    stem = Path(original).stem
+    module = sanitize_filename(str(attachment.get("module_title") or attachment.get("page_title") or "module"))
+    version = sanitize_filename(str(attachment.get("selected_version") or ""))
+    page_id = _compact_filename_identity(str(attachment.get("page_id") or "unknown"))
+    attachment_id = _compact_filename_identity(str(attachment.get("attachment_id") or "unknown"))
+    attachment_version = int(attachment.get("attachment_version") or 0)
+    business_identity = "\0".join(
+        str(attachment.get(key) or "")
+        for key in ["page_id", "attachment_id", "attachment_version", "module_key", "page_title", "file_name"]
+    )
+    business_digest = hashlib.sha256(business_identity.encode("utf-8")).hexdigest()[:10]
+    readable = "__".join(part for part in [module, version, stem] if part)
+    identity = f"__p{page_id}__a{attachment_id}v{attachment_version}__s{business_digest}"
+    max_chars = max(140, int(os.getenv("CONFLUENCE_LOCAL_FILENAME_MAX_CHARS", "180")))
+    available = max_chars - len(identity) - len(suffix)
+    readable = readable[: max(1, available)].rstrip(" ._") or "attachment"
+    return sanitize_filename(f"{readable}{identity}{suffix}")
+
+
+def _compact_filename_identity(value: str, limit: int = 48) -> str:
+    safe = sanitize_filename(value)
+    if len(safe) <= limit:
+        return safe
+    digest = hashlib.sha256(safe.encode("utf-8")).hexdigest()[:10]
+    return f"{safe[: limit - 12]}__{digest}"
 
 
 def main() -> int:

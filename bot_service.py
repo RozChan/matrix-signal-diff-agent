@@ -238,12 +238,37 @@ def _merge_version_artifact(tdir: Path, name: str, version: str, payload: dict[s
         return artifact
 
 
-def _existing_input_hashes(tdir: Path, version: str) -> set[str]:
-    hashes: set[str] = set()
-    for path in (tdir / "input" / version).glob("*.xls*"):
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        hashes.add(digest)
-    return hashes
+def _attachment_identity(attachment: dict[str, Any]) -> tuple[str, str, int, str, str, str]:
+    return (
+        str(attachment.get("page_id") or ""),
+        str(attachment.get("attachment_id") or ""),
+        int(attachment.get("attachment_version") or 0),
+        str(attachment.get("module_key") or ""),
+        str(attachment.get("page_title") or ""),
+        str(attachment.get("file_name") or attachment.get("original_filename") or ""),
+    )
+
+
+def _identity_text(record: dict[str, Any]) -> str:
+    return (
+        f"{record.get('page_id', '')}:{record.get('attachment_id', '')}:v{int(record.get('attachment_version') or 0)}"
+        f":m{record.get('module_key', '')}:{record.get('original_filename') or record.get('file_name', '')}"
+    )
+
+
+def _annotate_content_duplicates(records: list[dict[str, Any]]) -> None:
+    by_hash: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        by_hash.setdefault(str(record.get("sha256") or ""), []).append(record)
+    for sha256, group in by_hash.items():
+        duplicate = bool(sha256 and len(group) > 1)
+        identities = [_identity_text(item) for item in group]
+        for record in group:
+            own_identity = _identity_text(record)
+            record["content_duplicate"] = duplicate
+            record["duplicate_content_group"] = sha256 if duplicate else ""
+            record["duplicate_with"] = [identity for identity in identities if identity != own_identity]
+            record["preserved_reason"] = "different_business_source" if duplicate else ""
 
 
 def _safe_update_task_meta(tdir: Path, **updates: Any) -> bool:
@@ -461,20 +486,6 @@ def _monitor_worker_completion(task_id: str, tdir: Path, process: subprocess.Pop
         _WORKER_PROCESSES.pop(task_id, None)
     meta = load_task_meta(tdir)
     if return_code != 0 and meta.get("status") not in {"cancelled", "failed", "awaiting_review", "final_exported", "delivered"}:
-        update_task_meta(tdir, status="failed", current_stage="失败", stage_progress=100, error=f"task_worker退出码非0：{return_code}")
-        meta = load_task_meta(tdir)
-    sync_task_progress_card(tdir, client, force=True)
-    if meta.get("status") == "awaiting_review":
-        notify_review_ready(client, tdir, meta)
-    elif meta.get("status") == "failed":
-        notify_task_failed(client, tdir, meta)
-    log.info("worker finished task_id=%s return_code=%s status=%s", task_id, return_code, meta.get("status"))
-
-
-def _monitor_worker_completion(task_id: str, tdir: Path, process: subprocess.Popen, client: LarkCliClient) -> None:
-    return_code = process.wait()
-    meta = load_task_meta(tdir)
-    if return_code != 0 and meta.get("status") not in {"failed", "awaiting_review", "final_exported", "delivered"}:
         update_task_meta(tdir, status="failed", current_stage="失败", stage_progress=100, error=f"task_worker退出码非0：{return_code}")
         meta = load_task_meta(tdir)
     sync_task_progress_card(tdir, client, force=True)
@@ -719,26 +730,22 @@ def _download_confluence_source(task_id: str, tdir: Path, source: dict[str, Any]
                 return
             target_dir = tdir / "input" / version
             downloaded = []
-            seen_ids: set[str] = set()
-            known_hashes = _existing_input_hashes(tdir, version)
+            seen_attachments: set[tuple[str, str, int, str, str, str]] = set()
             manifest_records: list[dict[str, Any]] = []
             for index, attachment in enumerate(attachments, start=1):
                 if _task_cancelled(tdir):
                     update_source(tdir, url, status="cancelled", errors=["任务已取消"], downloaded_count=len(downloaded), attachments=downloaded)
                     return
-                aid = attachment.get("attachment_id", "")
-                if aid and aid in seen_ids:
+                identity = _attachment_identity(attachment)
+                if identity in seen_attachments:
                     continue
-                seen_ids.add(aid)
+                seen_attachments.add(identity)
                 local_path = confluence.download_attachment(attachment, target_dir)
                 _ensure_confluence_task_size(tdir)
                 sha256 = hashlib.sha256(local_path.read_bytes()).hexdigest()
-                if sha256 in known_hashes:
-                    local_path.unlink(missing_ok=True)
-                    attachment["skip_reason"] = "内容SHA-256重复"
-                    continue
-                known_hashes.add(sha256)
                 attachment["local_path"] = str(local_path)
+                attachment["local_filename"] = local_path.name
+                attachment["original_filename"] = attachment.get("file_name", "")
                 attachment["version"] = version
                 attachment["sha256"] = sha256
                 attachment["downloaded_at"] = _utc_now_iso()
@@ -754,6 +761,8 @@ def _download_confluence_source(task_id: str, tdir: Path, source: dict[str, Any]
                     "selected_version": attachment.get("selected_version", ""),
                     "attachment_id": attachment.get("attachment_id", ""),
                     "attachment_name": attachment.get("file_name", ""),
+                    "original_filename": attachment.get("file_name", ""),
+                    "local_filename": local_path.name,
                     "attachment_version": attachment.get("attachment_version", 0),
                     "attachment_updated_at": attachment.get("attachment_updated_at", ""),
                     "file_size": local_path.stat().st_size,
@@ -764,6 +773,12 @@ def _download_confluence_source(task_id: str, tdir: Path, source: dict[str, Any]
                 update_source(tdir, url, downloaded_count=len(downloaded), attachments=downloaded)
                 _safe_update_task_meta(tdir, confluence_downloaded_count=len(downloaded), current_signal="")
                 sync_task_progress_card(tdir, client)
+            _annotate_content_duplicates(manifest_records)
+            duplicate_by_identity = {_identity_text(record): record for record in manifest_records}
+            for attachment in downloaded:
+                audit = duplicate_by_identity.get(_identity_text(attachment), {})
+                for key in ["content_duplicate", "duplicate_content_group", "duplicate_with", "preserved_reason"]:
+                    attachment[key] = audit.get(key, False if key == "content_duplicate" else ([] if key == "duplicate_with" else ""))
             if source.get("select_latest_version"):
                 _merge_version_artifact(tdir, "input_manifest.json", version, {"root_page_url": url, "files": manifest_records, "excluded_attachments": selection.get("excluded_attachments", [])})
             try:

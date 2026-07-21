@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import bot_service
 from core.bot_task_store import set_active_task_id
-from core.confluence_client import ConfluenceClient
+from core.confluence_client import ConfluenceClient, attachment_local_filename
 from core.confluence_page_selection import classify_page, parse_page_version, select_latest_version_pages
 from core.full_compare_task import FullCompareBusyError, create_full_matrix_compare_task
 from core.confluence_task_store import update_source
@@ -136,6 +136,72 @@ def test_same_name_on_different_modules_is_not_dropped_before_sha_deduplication(
     ]
     attachments, _ = client.discover_latest_excel_attachments("root")
     assert {(item["page_id"], item["attachment_id"]) for item in attachments} == {("hcu", "hcu-file"), ("pdcs", "pdcs-file")}
+
+
+def test_content_duplicates_are_audited_but_preserved() -> None:
+    records = [
+        {"page_id": "pageA", "attachment_id": "att001", "attachment_version": 1, "original_filename": "HCU矩阵.xlsx", "sha256": "same"},
+        {"page_id": "pageB", "attachment_id": "att002", "attachment_version": 1, "original_filename": "PDCS矩阵.xlsx", "sha256": "same"},
+    ]
+    bot_service._annotate_content_duplicates(records)
+    assert all(item["content_duplicate"] is True for item in records)
+    assert records[0]["duplicate_with"] == ["pageB:att002:v1:m:PDCS矩阵.xlsx"]
+    assert records[1]["preserved_reason"] == "different_business_source"
+
+
+def test_attachment_local_filename_is_readable_stable_and_identity_scoped(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CONFLUENCE_LOCAL_FILENAME_MAX_CHARS", "140")
+    base = {
+        "module_title": "HCU/动力域",
+        "selected_version": "V4.2",
+        "file_name": "Communication:Matrix.xlsx",
+        "page_id": "10001",
+        "attachment_id": "att001",
+        "attachment_version": 3,
+    }
+    first = attachment_local_filename(base)
+    assert first == attachment_local_filename(dict(base))
+    assert "__p10001__aatt001v3__s" in first and first.endswith(".xlsx")
+    assert "/" not in first and ":" not in first
+    assert len(first) <= 140
+    assert attachment_local_filename({**base, "page_id": "10002"}) != first
+    assert attachment_local_filename({**base, "attachment_id": "att002"}) != first
+    assert attachment_local_filename({**base, "attachment_version": 4}) != first
+    assert attachment_local_filename({**base, "module_title": "PDCS"}) != first
+    assert attachment_local_filename({**base, "file_name": "Other.xlsx"}) != first
+
+
+def test_retry_download_reuses_same_stable_local_filename(tmp_path: Path) -> None:
+    client = object.__new__(ConfluenceClient)
+    client.base_url = "https://confluence.example"
+    client.max_file_size = 1024
+    payloads = [b"first-complete-file", b"second-complete-file"]
+
+    class Response:
+        headers = {}
+
+        def __init__(self, payload: bytes):
+            self.payload = payload
+
+        def iter_content(self, chunk_size: int):
+            yield self.payload
+
+    client._request = lambda *args, **kwargs: Response(payloads.pop(0))
+    attachment = {
+        "module_title": "HCU",
+        "selected_version": "V4.2",
+        "file_name": "Matrix.xlsx",
+        "page_id": "10001",
+        "attachment_id": "att001",
+        "attachment_version": 3,
+        "download_link": "/download/att001",
+    }
+    first = client.download_attachment(attachment, tmp_path)
+    second = client.download_attachment(attachment, tmp_path)
+    assert first == second
+    assert second.read_bytes() == b"second-complete-file"
+    assert list(tmp_path.glob("*.xlsx")) == [second]
+    assert not list(tmp_path.glob("*.download"))
 
 
 def test_unified_entry_registers_two_sources_and_is_persistently_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
