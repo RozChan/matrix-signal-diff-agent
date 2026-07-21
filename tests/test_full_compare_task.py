@@ -167,6 +167,27 @@ def test_full_compare_command_requires_enabled_nonempty_allowlist(monkeypatch: p
     monkeypatch.setenv("FULL_COMPARE_ALLOWED_OPEN_IDS", "")
     bot_service.handle_event({**event, "message_id": "om_2"}, client)
     assert "白名单" in client.replies[-1][1]
+    assert "白名单数量：0" in client.replies[-1][1]
+
+
+def test_standard_nested_feishu_event_extracts_open_id_and_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    event = {
+        "event": {
+            "sender": {"sender_id": {"open_id": "ou_nested"}},
+            "message": {
+                "message_id": "om_nested",
+                "chat_id": "oc_nested",
+                "message_type": "text",
+                "content": '{"text":"创建自动全量任务"}',
+            },
+        }
+    }
+    assert bot_service._sender_id(event) == "ou_nested"
+    assert bot_service._message_id(event) == "om_nested"
+    assert bot_service._chat_id(event) == "oc_nested"
+    assert bot_service._extract_text(event) == "创建自动全量任务"
+    monkeypatch.setenv("FULL_COMPARE_ALLOWED_OPEN_IDS", "ou_other， ou_nested\nou_third")
+    assert bot_service._full_compare_allowed_user("ou_nested") is True
 
 
 def test_exact_command_creates_and_schedules_without_confirmation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

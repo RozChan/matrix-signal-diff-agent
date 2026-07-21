@@ -82,9 +82,26 @@ def _allowed_user(sender_id: str) -> bool:
     return not allowed or sender_id in allowed
 
 
+def _split_identifiers(value: str) -> set[str]:
+    return {part.strip().lstrip("\ufeff") for part in re.split(r"[,，;；\s]+", value or "") if part.strip().lstrip("\ufeff")}
+
+
 def _full_compare_allowed_user(sender_id: str) -> bool:
-    allowed = {part.strip() for part in os.getenv("FULL_COMPARE_ALLOWED_OPEN_IDS", "").split(",") if part.strip()}
+    allowed = _split_identifiers(os.getenv("FULL_COMPARE_ALLOWED_OPEN_IDS", ""))
     return bool(allowed) and sender_id in allowed
+
+
+def _event_candidates(event: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return flattened and standard Feishu event payload variants."""
+
+    candidates = [event]
+    for path in [("event",), ("data",), ("data", "event")]:
+        value: Any = event
+        for key in path:
+            value = value.get(key, {}) if isinstance(value, dict) else {}
+        if isinstance(value, dict) and value not in candidates:
+            candidates.append(value)
+    return candidates
 
 
 def _dedupe(message_id: str) -> bool:
@@ -99,7 +116,12 @@ def _dedupe(message_id: str) -> bool:
 
 
 def _extract_text(event: dict[str, Any]) -> str:
-    content = event.get("content", "")
+    content: Any = ""
+    for candidate in _event_candidates(event):
+        message = candidate.get("message") if isinstance(candidate.get("message"), dict) else {}
+        content = candidate.get("content") or message.get("content") or ""
+        if content:
+            break
     if isinstance(content, str):
         try:
             data = json.loads(content)
@@ -139,19 +161,43 @@ def _extract_file_info(event: dict[str, Any]) -> dict[str, str] | None:
 
 
 def _sender_id(event: dict[str, Any]) -> str:
-    return str(event.get("sender_id") or event.get("sender", {}).get("sender_id", {}).get("open_id") or "")
+    for candidate in _event_candidates(event):
+        sender = candidate.get("sender") if isinstance(candidate.get("sender"), dict) else {}
+        sender_ids = sender.get("sender_id") if isinstance(sender.get("sender_id"), dict) else {}
+        direct = candidate.get("sender_id")
+        if isinstance(direct, dict):
+            direct = direct.get("open_id")
+        value = direct or sender_ids.get("open_id") or sender.get("open_id")
+        if value:
+            return str(value).strip()
+    return ""
 
 
 def _chat_id(event: dict[str, Any]) -> str:
-    return str(event.get("chat_id") or event.get("message", {}).get("chat_id") or "")
+    for candidate in _event_candidates(event):
+        message = candidate.get("message") if isinstance(candidate.get("message"), dict) else {}
+        value = candidate.get("chat_id") or message.get("chat_id")
+        if value:
+            return str(value)
+    return ""
 
 
 def _message_id(event: dict[str, Any]) -> str:
-    return str(event.get("message_id") or event.get("message", {}).get("message_id") or "")
+    for candidate in _event_candidates(event):
+        message = candidate.get("message") if isinstance(candidate.get("message"), dict) else {}
+        value = candidate.get("message_id") or message.get("message_id")
+        if value:
+            return str(value)
+    return ""
 
 
 def _message_type(event: dict[str, Any]) -> str:
-    return str(event.get("message_type") or event.get("message", {}).get("message_type") or "")
+    for candidate in _event_candidates(event):
+        message = candidate.get("message") if isinstance(candidate.get("message"), dict) else {}
+        value = candidate.get("message_type") or message.get("message_type")
+        if value:
+            return str(value)
+    return ""
 
 
 def _ensure_session(sender_id: str, chat_id: str, message_id: str, client: LarkCliClient) -> tuple[str, Path]:
@@ -231,7 +277,16 @@ def _handle_full_compare_command(event: dict[str, Any], client: LarkCliClient, c
         client.reply_text(message_id, "自动全量信号对比功能尚未启用。")
         return
     if not _full_compare_allowed_user(sender):
-        client.reply_text(message_id, "当前用户不在自动全量任务白名单中。")
+        allowed_count = len(_split_identifiers(os.getenv("FULL_COMPARE_ALLOWED_OPEN_IDS", "")))
+        masked_sender = f"{sender[:6]}...{sender[-4:]}" if len(sender) > 12 else (sender or "<未解析到>")
+        log.warning("full compare denied sender=%s configured_allowed_count=%s", masked_sender, allowed_count)
+        client.reply_text(
+            message_id,
+            "当前用户不在自动全量任务白名单中。\n"
+            f"机器人从本条事件识别到的open_id：{masked_sender}\n"
+            f"当前进程读取到的白名单数量：{allowed_count}\n"
+            "请确认修改的是机器人运行目录中的.env，并在修改后重启机器人进程。",
+        )
         return
     try:
         result = create_full_matrix_compare_task(
