@@ -157,17 +157,12 @@ class _ReplyClient:
         self.replies.append((message_id, text))
 
 
-def test_full_compare_command_requires_enabled_nonempty_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_full_compare_command_only_requires_feature_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _ReplyClient()
     event = {"message_id": "om_1", "sender_id": "ou_a", "content": '{"text":"创建自动全量任务"}'}
     monkeypatch.setenv("FULL_COMPARE_COMMAND_ENABLED", "false")
     bot_service.handle_event(event, client)
     assert "尚未启用" in client.replies[-1][1]
-    monkeypatch.setenv("FULL_COMPARE_COMMAND_ENABLED", "true")
-    monkeypatch.setenv("FULL_COMPARE_ALLOWED_OPEN_IDS", "")
-    bot_service.handle_event({**event, "message_id": "om_2"}, client)
-    assert "白名单" in client.replies[-1][1]
-    assert "白名单数量：0" in client.replies[-1][1]
 
 
 def test_standard_nested_feishu_event_extracts_open_id_and_command(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -186,15 +181,12 @@ def test_standard_nested_feishu_event_extracts_open_id_and_command(monkeypatch: 
     assert bot_service._message_id(event) == "om_nested"
     assert bot_service._chat_id(event) == "oc_nested"
     assert bot_service._extract_text(event) == "创建自动全量任务"
-    monkeypatch.setenv("FULL_COMPARE_ALLOWED_OPEN_IDS", "ou_other， ou_nested\nou_third")
-    assert bot_service._full_compare_allowed_user("ou_nested") is True
 
 
 def test_exact_command_creates_and_schedules_without_confirmation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _configure(monkeypatch)
     monkeypatch.setenv("TASK_ROOT_DIR", str(tmp_path))
     monkeypatch.setenv("FULL_COMPARE_COMMAND_ENABLED", "true")
-    monkeypatch.setenv("FULL_COMPARE_ALLOWED_OPEN_IDS", "ou_a")
     monkeypatch.setattr(bot_service, "sync_task_progress_card", lambda *args, **kwargs: True)
     started = []
 
