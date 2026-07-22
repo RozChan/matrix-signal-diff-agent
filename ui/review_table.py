@@ -79,7 +79,7 @@ def render_compact_review(task_dir, review_dir, task_id: str, items: list[dict[s
     sources = ["全部", *sorted({str(item.get("source_sheet") or "") for item in items if item.get("source_sheet")})]
     fields = ["全部", *sorted({str(field) for item in items for field in (item.get("diff_fields") or [])})]
     ai_values = ["全部", *sorted({str(item.get("signal_ai_judgement") or "") for item in items if item.get("signal_ai_judgement")})]
-    f1, f2, f3, f4, f5, size_col, page_col = st.columns([1, 1, .9, 1.1, 1.2, .65, 1.05])
+    f1, f2, f3, f4, f5, size_col, page_col = st.columns([1, 1, .9, 1.1, 1.2, .65, .78], gap="small")
     source = f1.selectbox("来源Sheet", sources, key=f"table-source-{task_id}")
     field = f2.selectbox("差异字段", fields, key=f"table-field-{task_id}")
     ai = f3.selectbox("AI判断", ai_values, key=f"table-ai-{task_id}")
@@ -96,13 +96,13 @@ def render_compact_review(task_dir, review_dir, task_id: str, items: list[dict[s
     page_key = f"table-page-{task_id}"
     page = max(1, min(int(st.session_state.get(page_key, 1)), pages))
     st.session_state[page_key] = page
-    page_col.caption("页码")
-    previous, indicator, following = page_col.columns([1, 1.8, 1])
-    if previous.button("◀", disabled=page <= 1, key=f"table-prev-{task_id}", help="上一页"):
+    page_col.markdown("<div style='height:28px'>页码</div>", unsafe_allow_html=True)
+    previous, indicator, following = page_col.columns([1, 1.25, 1], gap="small")
+    if previous.button("◀", disabled=page <= 1, key=f"table-prev-{task_id}", help="上一页", width="stretch"):
         st.session_state[page_key] = page - 1
         st.rerun()
-    indicator.markdown(f"<div style='text-align:center;padding-top:7px'>{page}/{pages}</div>", unsafe_allow_html=True)
-    if following.button("▶", disabled=page >= pages, key=f"table-next-{task_id}", help="下一页"):
+    indicator.markdown(f"<div style='text-align:center;padding-top:8px;white-space:nowrap'>{page}/{pages}</div>", unsafe_allow_html=True)
+    if following.button("▶", disabled=page >= pages, key=f"table-next-{task_id}", help="下一页", width="stretch"):
         st.session_state[page_key] = page + 1
         st.rerun()
     start = (page - 1) * page_size
@@ -122,16 +122,16 @@ def render_compact_review(task_dir, review_dir, task_id: str, items: list[dict[s
         disabled=["row_id", "序号", "信号名", "来源Sheet", "差异字段", "差异", "AI判断", "AI置信度", *([] if can_edit else ["审核结果", "审核备注"])],
         column_config={
             "row_id": None,
-            "序号": st.column_config.NumberColumn("序号", width="small"),
-            "信号名": st.column_config.TextColumn("信号名", width="medium"),
-            "来源Sheet": st.column_config.TextColumn("来源Sheet", width="medium"),
-            "差异字段": st.column_config.TextColumn("差异字段", width="small"),
-            "差异": st.column_config.TextColumn("具体差异（4.0 / 5.1）", width="medium"),
-            "AI判断": st.column_config.TextColumn("AI判断", width="small"),
-            "AI置信度": st.column_config.TextColumn("置信度", width="small"),
-            "审核结果": st.column_config.SelectboxColumn("👉 审核结果", options=[PENDING_REVIEW_LABEL, *[review_result_display(result) for result in TABLE_RESULTS]], required=True, width="medium"),
-            "审核备注": st.column_config.TextColumn("审核备注", width="small"),
-            "详情": st.column_config.CheckboxColumn("详情", width="small"),
+            "序号": st.column_config.NumberColumn("序号", width=55),
+            "信号名": st.column_config.TextColumn("信号名", width=220),
+            "来源Sheet": st.column_config.TextColumn("来源Sheet", width=205),
+            "差异字段": st.column_config.TextColumn("差异字段", width=105),
+            "差异": st.column_config.TextColumn("具体差异（4.0 / 5.1）", width=420),
+            "AI判断": st.column_config.TextColumn("AI判断", width=110),
+            "AI置信度": st.column_config.TextColumn("置信度", width=70),
+            "审核结果": st.column_config.SelectboxColumn("👉 审核结果", options=[PENDING_REVIEW_LABEL, *[review_result_display(result) for result in TABLE_RESULTS]], required=True, width=155),
+            "审核备注": st.column_config.TextColumn("审核备注", width=210),
+            "详情": st.column_config.CheckboxColumn("详情", width=55),
         },
         key=f"review-editor-{task_id}-{page}-{page_size}-{source}-{field}-{ai}-{review_status}-{search}-{int(st.session_state.get(editor_version_key, 0))}",
     )
