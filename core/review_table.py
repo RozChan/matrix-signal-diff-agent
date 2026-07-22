@@ -8,20 +8,24 @@ from typing import Any
 from .review_store import MANUAL_REVIEW_RESULTS, load_review_state, update_review_item
 
 TABLE_RESULTS = tuple(MANUAL_REVIEW_RESULTS)
-PENDING_REVIEW_LABEL = "🔴 待选择（点击此处审核）"
+PENDING_REVIEW_LABEL = "🔴 待选择　　　| 未审核"
 
 
 def review_result_display(value: Any) -> str:
     result = str(value or "")
-    return f"🟢 已审核｜{result}" if result in TABLE_RESULTS else PENDING_REVIEW_LABEL
+    if result not in TABLE_RESULTS:
+        return PENDING_REVIEW_LABEL
+    padded = result + ("　" if len(result) < 6 else "")
+    return f"🟢 {padded} | 已审核"
 
 
 def review_result_value(value: Any) -> str:
     text = str(value or "")
     if text == PENDING_REVIEW_LABEL:
         return ""
-    prefix = "🟢 已审核｜"
-    return text[len(prefix) :] if text.startswith(prefix) else text
+    if text.startswith("🟢 ") and " | 已审核" in text:
+        return text.removeprefix("🟢 ").removesuffix(" | 已审核").strip()
+    return text
 
 
 def diff_summary(item: dict[str, Any], limit: int | None = None) -> str:
@@ -40,8 +44,7 @@ def table_row(item: dict[str, Any], review: dict[str, Any], sequence: int, draft
     return {
         "row_id": str(item.get("item_id") or ""),
         "序号": sequence,
-        "4.0信号名": str(item.get("signal_40") or ""),
-        "5.1信号名": str(item.get("signal_51") or ""),
+        "信号名": signal_name_display(item),
         "来源Sheet": str(item.get("source_sheet") or ""),
         "差异字段": "、".join(item.get("diff_fields") or []),
         "差异": diff_summary(item),
@@ -50,6 +53,20 @@ def table_row(item: dict[str, Any], review: dict[str, Any], sequence: int, draft
         "审核结果": review_result_display(draft.get("manual_review_result", review.get("manual_review_result", ""))),
         "审核备注": draft.get("manual_note", review.get("manual_note", "")),
     }
+
+
+def signal_name_display(item: dict[str, Any]) -> str:
+    signal40 = str(item.get("signal_40") or "<空>")
+    signal51 = str(item.get("signal_51") or "<空>")
+    return signal40 if signal40 == signal51 else f"4.0: {signal40} ↔ 5.1: {signal51}"
+
+
+def choose_exclusive_detail(checked_ids: list[str], previous: str) -> str:
+    if not checked_ids:
+        return ""
+    if len(checked_ids) == 1:
+        return checked_ids[0]
+    return next((row_id for row_id in reversed(checked_ids) if row_id != previous), checked_ids[-1])
 
 
 def apply_editor_changes(rows: list[dict[str, Any]], edited_rows: list[dict[str, Any]], drafts: dict[str, dict[str, Any]], state_items: dict[str, Any]) -> set[str]:

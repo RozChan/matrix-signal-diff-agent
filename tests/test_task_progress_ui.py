@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.confluence_task_store import add_sources, update_source
 from core.review_store import acquire_review_lock, create_task_meta, init_review_state, load_review_state, update_task_meta
-from core.review_table import PENDING_REVIEW_LABEL, TABLE_RESULTS, apply_editor_changes, review_result_display, save_dirty_reviews, table_row
+from core.review_table import PENDING_REVIEW_LABEL, TABLE_RESULTS, apply_editor_changes, choose_exclusive_detail, review_result_display, save_dirty_reviews, signal_name_display, table_row
 from core.task_progress import ACTIVE_STATUSES, allowed_admin_actions, beijing_time, build_task_progress, choose_default_task, overall_percent
 from ui.review_table import chinese_review_stats, filter_review_items
 
@@ -86,6 +86,7 @@ def test_review_table_defaults_to_pending_and_keeps_stable_row_ids(tmp_path: Pat
     assert [item["item_id"] for item in filtered] == ["pending"]
     all_rows = [table_row(item, state["items"][item["item_id"]], idx + 1) for idx, item in enumerate(items)]
     assert [row["row_id"] for row in all_rows] == ["pending", "default"]
+    assert all_rows[0]["信号名"] == "4.0: A-pending ↔ 5.1: B-pending"
     assert "4.0=Key not stored" in all_rows[0]["差异"] and "5.1=SC or SK not stored" in all_rows[0]["差异"]
     assert tuple(TABLE_RESULTS) == ("确认真实差异", "确认可忽略", "确认错别字", "确认语义一致", "存疑待确认")
 
@@ -113,9 +114,18 @@ def test_pending_and_ai_suspected_ignore_filters_are_distinct(tmp_path: Path) ->
 
 def test_review_result_prompt_and_chinese_statistics() -> None:
     assert review_result_display("") == PENDING_REVIEW_LABEL
-    assert review_result_display("确认真实差异").startswith("🟢 已审核")
+    assert review_result_display("确认真实差异") == "🟢 确认真实差异 | 已审核"
+    assert review_result_display("确认可忽略") == "🟢 确认可忽略　 | 已审核"
     translated = chinese_review_stats({"total": 12, "priority_review": 8, "pending_manual": 12, "updated_at": "2026-07-22T02:00:00+00:00"})
     assert translated == {"审核项总数": 12, "AI判断疑似可忽略": 8, "待人工确认": 12, "最后更新时间": "2026-07-22 10:00:00"}
+
+
+def test_signal_names_merge_only_when_equal_and_detail_is_exclusive() -> None:
+    assert signal_name_display({"signal_40": "Same", "signal_51": "Same"}) == "Same"
+    assert signal_name_display({"signal_40": "HCU_PowerLimit", "signal_51": "VCU_PowerLimit"}) == "4.0: HCU_PowerLimit ↔ 5.1: VCU_PowerLimit"
+    assert choose_exclusive_detail(["old", "new"], "old") == "new"
+    assert choose_exclusive_detail(["new", "old"], "old") == "new"
+    assert choose_exclusive_detail([], "old") == ""
 
 
 def test_dirty_batch_save_preserves_lock_and_revision(tmp_path: Path) -> None:
