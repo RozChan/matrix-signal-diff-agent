@@ -28,6 +28,10 @@ from core.result_notifier import build_results_zip
 from core.result_access import allowed_result_files, ensure_result_access, result_token_valid
 from core.notification_router import notify_result_ready
 from core.admin_tasks import admin_system_status, admin_token_valid, cancel_admin_task, create_admin_full_compare, list_admin_tasks, retry_admin_confluence, safe_task_dir
+from core.task_progress import ACTIVE_STATUSES, allowed_admin_actions, beijing_time, build_task_progress, choose_default_task, status_label, trigger_label
+from core.review_table import pending_review_count
+from ui.admin_progress import render_live_task_progress
+from ui.review_table import render_compact_review
 from core.review_store import (
     MANUAL_REVIEW_RESULTS,
     append_review_log,
@@ -168,8 +172,8 @@ def _show_review_lock_panel(task_dir: Path, task_id: str, state: dict) -> tuple[
                 f"任务状态：{meta.get('status', '')}",
                 f"当前模式：{mode}",
                 f"当前审核人：{owner}",
-                f"锁定时间：{meta.get('review_locked_at') or '无'}",
-                f"最近活动：{meta.get('review_lock_last_active_at') or '无'}",
+                f"锁定时间：{beijing_time(meta.get('review_locked_at'))}",
+                f"最近活动：{beijing_time(meta.get('review_lock_last_active_at'))}",
                 f"数据 revision：{state.get('revision', 0)}",
             ]
         )
@@ -184,7 +188,7 @@ def _show_review_lock_panel(task_dir: Path, task_id: str, state: dict) -> tuple[
         return True, session_id, meta
 
     if _lock_is_active_for_other(meta, session_id):
-        st.warning(f"该任务正在由{owner}审核，当前为只读模式。最近活动时间：{meta.get('review_lock_last_active_at') or '无'}")
+        st.warning(f"该任务正在由{owner}审核，当前为只读模式。最近活动时间：{beijing_time(meta.get('review_lock_last_active_at'))}")
         takeover = st.checkbox("我确认要接管当前审核", key=f"takeover-confirm-{task_id}")
         if st.button("接管审核", disabled=not takeover, key=f"takeover-review-{task_id}"):
             try:
@@ -532,132 +536,10 @@ def _show_review_workspace() -> None:
         st.warning(f"当前任务 {task_id} 没有可审核数据。")
         return
 
-    st.header("人工审核工作台")
-    st.caption(f"当前 task_id：`{task_id}`")
-    if meta:
-        st.caption(f"创建时间：{meta.get('created_at', '')}")
     can_edit, session_id, meta = _show_review_lock_panel(task_dir, task_id, state)
-
-    stats = compute_review_stats(items, state)
-    labels = [
-        ("信号级审核项总数", "total"),
-        ("需人工优先确认", "priority_review"),
-        ("系统默认保留", "system_default_keep"),
-        ("人工已修改", "manual_modified"),
-        ("待人工确认", "pending_manual"),
-        ("最终保留差异", "confirmed_real_diff"),
-        ("确认可忽略", "ignored"),
-        ("确认错别字", "typo"),
-        ("确认语义一致", "semantic_same"),
-        ("存疑待确认", "uncertain"),
-        ("涉及差异字段总数", "diff_field_total"),
-        ("平均每信号字段数", "avg_diff_fields_per_signal"),
-    ]
-    for row_start in range(0, len(labels), 5):
-        cols = st.columns(5)
-        for col, (label, key) in zip(cols, labels[row_start : row_start + 5]):
-            col.metric(label, stats.get(key, 0))
-    st.caption(f"最后保存时间：{stats.get('updated_at') or '尚未保存人工审核'}")
-
-    st.subheader("筛选")
-    c1, c2, c3, c4 = st.columns(4)
-    c5, _, _, _ = st.columns(4)
-    filters = {
-        "source": c1.selectbox("来源Sheet", SOURCE_FILTERS),
-        "field": c2.selectbox("差异字段", FIELD_FILTERS),
-        "ai": c3.selectbox("AI判断结果", AI_FILTERS),
-        "review_source": c4.selectbox("审核来源", REVIEW_SOURCE_FILTERS),
-        "manual": c5.selectbox("人工审核状态", MANUAL_STATUS_FILTERS),
-    }
-    filtered = _filter_items(items, state, filters)
-    state_items_for_sort = state.get("items", {})
-    filtered = sorted(filtered, key=lambda item: review_sort_key(item, state_items_for_sort.get(item.get("item_id"), {})))
-    st.write(f"当前筛选结果：{len(filtered)} 个信号")
-
-    if not filtered:
-        _show_final_export(task_dir, review_dir, session_id=session_id, can_edit=can_edit)
-        _show_downloads(task_dir)
-        return
-
-    page_size = st.number_input("每页显示条数", min_value=1, max_value=50, value=20, step=1)
-    total_pages = max((len(filtered) - 1) // int(page_size) + 1, 1)
-    page = st.number_input("页码", min_value=1, max_value=total_pages, value=1, step=1, key=f"review-page-input-{task_id}")
-    start = (int(page) - 1) * int(page_size)
-    page_items = filtered[start : start + int(page_size)]
-
-    st.subheader("审核操作")
-    state_items = state.get("items", {})
-    for offset, item in enumerate(page_items, start=start + 1):
-        item_id = item["item_id"]
-        review = state_items.get(item_id, {})
-        title = f"{offset}. {item.get('signal_40') or '<空>'} ⇄ {item.get('signal_51') or '<空>'}｜{'、'.join(item.get('diff_fields', []))}"
-        badge = review_badge(item, review)
-        _render_review_card_header(title, badge, item.get("signal_ai_judgement", ""), review.get("manual_review_result", ""))
-        preferred_item = st.session_state.get(f"expand-item-{task_id}")
-        with st.expander(title, expanded=(preferred_item == item_id) or (not preferred_item and offset == start + 1)):
-            left, right = st.columns(2)
-            left.markdown("**4.0 信号名**")
-            left.code(item.get("signal_40", "") or "<空>", language="text")
-            right.markdown("**5.1 信号名**")
-            right.code(item.get("signal_51", "") or "<空>", language="text")
-            st.write(f"来源Sheet：{item.get('source_sheet', '')}")
-            st.write(f"差异字段汇总：{'、'.join(item.get('diff_fields', []))}")
-            st.write(f"差异字段数量：{item.get('diff_field_count', 0)}；包含数值类差异：{'是' if item.get('has_numeric_diff') else '否'}；包含文本类差异：{'是' if item.get('has_text_diff') else '否'}")
-            st.write(f"信号级AI判断结果：{item.get('signal_ai_judgement', '')}；差异类型汇总：{item.get('difference_type_summary', '')}；置信度：{item.get('confidence', '')}")
-            st.write(f"信号级AI建议处理方式：{item.get('signal_ai_suggested_action', '')}")
-            st.write(f"系统默认结论：{review.get('default_review_result') or '无'}")
-            st.write(f"当前最终结论：{review.get('manual_review_result') or '待人工确认'}")
-            st.write(f"审核来源：{badge}")
-            if badge == "系统默认保留":
-                st.success("🟢 系统默认保留：该信号已默认保留为真实差异，人工可修改。")
-            elif badge == "需人工优先确认":
-                st.warning("🟠 需人工优先确认：AI认为该信号差异可能可忽略，请优先人工确认。")
-            elif badge == "人工已修改":
-                st.info("🔵 人工已修改：该条已由人工修改，最终以人工审核结果为准。")
-            else:
-                st.info("⚪ 需人工确认：AI未给出可直接采用结论，请人工确认。")
-            st.info(item.get("signal_ai_reason", "") or review.get("default_reason") or "无 AI 理由")
-            with st.expander("查看字段差异明细", expanded=True):
-                for diff in item.get("field_diffs", []):
-                    st.markdown(f"**{diff.get('diff_field', '未解析')}**")
-                    left_diff, right_diff = st.columns(2)
-                    left_diff.markdown("4.0内容：")
-                    left_diff.code(_display_text(diff.get("value_40", "")), language="text")
-                    right_diff.markdown("5.1内容：")
-                    right_diff.code(_display_text(diff.get("value_51", "")), language="text")
-                    field_type = {"numeric": "数值类", "text": "文本类", "unknown": "未解析"}.get(diff.get("field_type"), "未解析")
-                    st.write(f"字段类型：{field_type}")
-            with st.expander("查看原始差异点list", expanded=False):
-                st.code(item.get("original_diff_list", ""), language="text")
-
-            current_result = review.get("manual_review_result", "")
-            options = [""] + MANUAL_REVIEW_RESULTS
-            selected_idx = options.index(current_result) if current_result in options else 0
-            manual_result = st.selectbox("人工审核结果", options, index=selected_idx, format_func=lambda x: x or "未审核", key=f"manual-result-{task_id}-{item_id}", disabled=not can_edit)
-            manual_note = st.text_area("人工备注", value=review.get("manual_note", ""), key=f"manual-note-{task_id}-{item_id}", disabled=not can_edit)
-            b1, b2 = st.columns(2)
-            if b1.button("保存当前审核", key=f"save-{task_id}-{item_id}", disabled=not can_edit):
-                try:
-                    update_review_item(review_dir, task_id, item_id, manual_result, manual_note, base_revision=int(state.get("revision") or 0), session_id=session_id)
-                    update_task_meta(task_dir, status="reviewing")
-                    st.success("已保存到 review_state.json")
-                    st.rerun()
-                except (ReviewConflictError, ReviewLockError) as exc:
-                    st.error(str(exc))
-            if b2.button("保存并下一条", key=f"save-next-{task_id}-{item_id}", disabled=not can_edit):
-                try:
-                    update_review_item(review_dir, task_id, item_id, manual_result, manual_note, base_revision=int(state.get("revision") or 0), session_id=session_id)
-                    update_task_meta(task_dir, status="reviewing")
-                    next_index = min(offset, len(filtered) - 1)
-                    if filtered:
-                        st.session_state[f"expand-item-{task_id}"] = filtered[next_index]["item_id"]
-                    st.success("已保存到 review_state.json")
-                    st.rerun()
-                except (ReviewConflictError, ReviewLockError) as exc:
-                    st.error(str(exc))
-
-    _show_batch_actions(task_dir, review_dir, task_id, filtered, state, can_edit=can_edit, session_id=session_id)
-    _show_final_export(task_dir, review_dir, session_id=session_id, can_edit=can_edit)
+    state, dirty_count = render_compact_review(task_dir, review_dir, task_id, items, state, can_edit=can_edit, session_id=session_id, display_text=_display_text)
+    pending_count = pending_review_count(state)
+    _show_final_export(task_dir, review_dir, session_id=session_id, can_edit=can_edit, dirty_count=dirty_count, pending_count=pending_count)
     _show_downloads(task_dir)
 
 
@@ -685,13 +567,17 @@ def _show_batch_actions(task_dir: Path, review_dir: Path, task_id: str, filtered
             st.rerun()
 
 
-def _show_final_export(task_dir: Path, review_dir: Path, *, session_id: str, can_edit: bool) -> None:
+def _show_final_export(task_dir: Path, review_dir: Path, *, session_id: str, can_edit: bool, dirty_count: int = 0, pending_count: int = 0) -> None:
     st.subheader("生成最终结果")
     final_path = _output_dir(task_dir) / FINAL_REVIEW_FILENAME
     meta = load_task_meta(task_dir)
     already_done = bool(meta.get("review_completed")) or meta.get("status") in {"final_exported", "delivered"}
     delivery_active = meta.get("result_delivery_status") in {"sending", "delivered"}
-    disabled = (not can_edit) or already_done or delivery_active
+    disabled = (not can_edit) or already_done or delivery_active or dirty_count > 0 or pending_count > 0
+    if dirty_count:
+        st.warning(f"还有 {dirty_count} 条未保存修改，请先保存。")
+    if pending_count:
+        st.warning(f"还有 {pending_count} 条待人工确认，完成后才能提交最终结果。")
     if st.button("完成审核并生成最终结果", type="primary", key=f"export-final-{task_dir.name}", disabled=disabled):
         try:
             begin_final_generation(task_dir, session_id)
@@ -782,23 +668,57 @@ def _show_admin_page() -> None:
         try:
             result = create_admin_full_compare(st.session_state["admin_create_operation_id"])
             st.session_state["admin_create_operation_id"] = f"admin:{secrets.token_urlsafe(18)}"
+            st.session_state["admin_selected_task_id"] = result.task_id
+            st.session_state["admin_selector_version"] = int(st.session_state.get("admin_selector_version", 0)) + 1
             st.success(f"任务已创建：{result.task_id}")
+            st.rerun()
         except Exception as exc:  # noqa: BLE001
             st.error(str(exc))
-    st.subheader("最近任务")
+
     rows = list_admin_tasks()
+    preferred = str(st.session_state.get("admin_selected_task_id") or st.query_params.get("admin_task_id", ""))
+    selected_default = choose_default_task(rows, preferred)
+    labels = {
+        row["task_id"]: f"{row['task_id']}｜{status_label(row['status'])}｜{trigger_label(row['trigger_source'])}｜{row['created_at_display']}"
+        for row in rows
+    }
+    task_ids = list(labels)
+    selected = st.selectbox(
+        "查看任务",
+        task_ids,
+        index=task_ids.index(selected_default) if selected_default in task_ids else 0,
+        format_func=lambda task_id: labels[task_id],
+        key=f"admin-task-selector-{int(st.session_state.get('admin_selector_version', 0))}",
+    ) if task_ids else ""
+    if selected:
+        st.session_state["admin_selected_task_id"] = selected
+        st.query_params["admin_task_id"] = selected
+        initial = build_task_progress(safe_task_dir(selected))
+        snapshot = render_live_task_progress(selected, initial["active"])
+
+    st.subheader("最近任务列表")
     st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
-    selected = st.selectbox("选择任务进行操作", [row["task_id"] for row in rows] if rows else [])
     if selected:
         row = next(item for item in rows if item["task_id"] == selected)
-        st.json(row)
-        c1, c2 = st.columns(2)
-        if c1.button("取消任务", key=f"admin-cancel-{selected}"):
-            st.success("任务已取消。" if cancel_admin_task(selected) else "当前状态无需取消。")
-            st.rerun()
-        if c2.button("重试Confluence下载", key=f"admin-retry-{selected}"):
+        actions = allowed_admin_actions(row["status"])
+        st.subheader("当前任务操作")
+        with st.expander("查看任务详情", expanded=False):
+            st.json(snapshot)
+        if "cancel" in actions:
+            confirm_cancel = st.checkbox("确认取消当前运行任务", key=f"confirm-cancel-{selected}")
+            if st.button("取消任务", key=f"admin-cancel-{selected}", disabled=not confirm_cancel):
+                st.success("任务已取消。" if cancel_admin_task(selected) else "任务已取消或当前状态不允许取消。")
+                st.rerun()
+        if "retry_confluence" in actions and st.button("重试失败的Confluence来源", key=f"admin-retry-{selected}"):
             st.success(f"已启动 {retry_admin_confluence(selected)} 个失败来源重试。")
             st.rerun()
+        if "recreate" in actions:
+            st.caption("已失败或取消的旧worker不会恢复；重新创建将生成新的task_id。")
+            if st.button("重新创建同类全量任务", key=f"admin-recreate-{selected}"):
+                result = create_admin_full_compare(f"admin:{secrets.token_urlsafe(18)}")
+                st.session_state["admin_selected_task_id"] = result.task_id
+                st.session_state["admin_selector_version"] = int(st.session_state.get("admin_selector_version", 0)) + 1
+                st.rerun()
         if row.get("review_url"):
             st.link_button("进入人工审核", row["review_url"])
         if row.get("result_url"):

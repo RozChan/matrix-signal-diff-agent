@@ -14,6 +14,7 @@ from .feishu_custom_bot import FeishuCustomBotClient
 from .result_access import allowed_result_files, ensure_result_access
 from .review_store import load_task_meta, update_task_meta
 from .task_lock import get_task_lock
+from .task_progress import beijing_time
 
 
 def _utc_now() -> str:
@@ -73,7 +74,7 @@ def notify_task_started(task_dir: Path, *, custom_client: FeishuCustomBotClient 
     trigger = "邮件自动触发" if meta.get("trigger_source") == "email_auto" else "管理员手动启动"
     subjects = list((meta.get("trigger_metadata") or {}).get("email_subjects") or [])
     subject_text = "\n邮件主题：" + "；".join(str(item)[:120] for item in subjects[:5]) if subjects else ""
-    text = f"任务编号：{meta.get('task_id', Path(task_dir).name)}\n触发方式：{trigger}\n触发时间：{meta.get('triggered_at', '')}\n当前阶段：{meta.get('current_stage', '')}{subject_text}"
+    text = f"任务编号：{meta.get('task_id', Path(task_dir).name)}\n触发方式：{trigger}\n触发时间：{beijing_time(meta.get('triggered_at'))}\n当前阶段：{meta.get('current_stage', '')}{subject_text}"
     return _custom_once(Path(task_dir), "started", "信号矩阵全量对比任务已启动", text, client=custom_client)
 
 
@@ -114,7 +115,7 @@ def notify_result_ready(task_dir: Path, *, custom_client: FeishuCustomBotClient 
         return False
     meta = ensure_result_access(tdir)
     files = allowed_result_files(tdir)
-    text = f"任务编号：{meta.get('task_id', tdir.name)}\n审核完成时间：{meta.get('review_completed_at', '')}\n最终文件状态：已生成\n结果文件数量：{len(files)}"
+    text = f"任务编号：{meta.get('task_id', tdir.name)}\n审核完成时间：{beijing_time(meta.get('review_completed_at'))}\n最终文件状态：已生成\n结果文件数量：{len(files)}"
     return _custom_once(tdir, "result_ready", "信号矩阵全量对比最终结果已生成", text, button_text="进入结果下载页", button_url=str(meta.get("result_url") or ""), client=custom_client)
 
 

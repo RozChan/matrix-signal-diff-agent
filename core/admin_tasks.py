@@ -48,12 +48,16 @@ def create_admin_full_compare(operation_id: str) -> FullCompareTaskResult:
 
 
 def list_admin_tasks(limit: int = 50) -> list[dict[str, Any]]:
+    from .task_progress import beijing_time
+
     rows = []
     for tdir, meta in scan_task_metas():
+        created_at = meta.get("created_at", meta.get("triggered_at", ""))
         rows.append({
             "task_id": meta.get("task_id", tdir.name),
             "trigger_source": meta.get("trigger_source", ""),
-            "created_at": meta.get("created_at", meta.get("triggered_at", "")),
+            "created_at": created_at,
+            "created_at_display": beijing_time(created_at),
             "status": meta.get("status", ""),
             "current_stage": meta.get("current_stage", ""),
             "progress": int(meta.get("stage_progress") or 0),
