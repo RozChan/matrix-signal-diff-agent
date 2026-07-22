@@ -738,6 +738,7 @@ def main() -> None:
     query_token = st.query_params.get("token", "")
     feishu_link_mode = bool(query_task_id or query_token)
     if feishu_link_mode:
+        st.title("EEA 4.0/5.1 矩阵同一信号差异识别工具")
         task_dir = _task_dir(str(query_task_id))
         meta = load_task_meta(task_dir)
         if not meta or not query_token or meta.get("review_token") != query_token:
