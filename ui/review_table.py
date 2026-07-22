@@ -9,8 +9,44 @@ import pandas as pd
 import streamlit as st
 
 from core.review_store import ReviewConflictError, ReviewLockError, compute_review_stats, load_review_state, update_task_meta
-from core.review_table import PENDING_REVIEW_LABEL, TABLE_RESULTS, apply_editor_changes, choose_exclusive_detail, pending_review_count, review_result_display, save_dirty_reviews, table_row
+from core.review_table import PENDING_REVIEW_LABEL, TABLE_RESULTS, apply_editor_changes, pending_review_count, review_result_display, save_dirty_reviews, table_row
 from core.task_progress import beijing_time
+
+
+def _capture_editor_changes(
+    editor_key: str,
+    rows: list[dict[str, Any]],
+    state_items: dict[str, Any],
+    drafts_key: str,
+    dirty_key: str,
+    detail_key: str,
+    editor_version_key: str,
+) -> None:
+    """Persist widget deltas before Streamlit rebuilds the editor data frame."""
+
+    widget_state = st.session_state.get(editor_key) or {}
+    edited_rows = widget_state.get("edited_rows") or {}
+    changed: list[dict[str, Any]] = []
+    selected_detail = str(st.session_state.get(detail_key) or "")
+    for raw_index, patch in edited_rows.items():
+        try:
+            row = dict(rows[int(raw_index)])
+        except (IndexError, TypeError, ValueError):
+            continue
+        row.update(patch)
+        changed.append(row)
+        if "详情" in patch:
+            selected_detail = str(row["row_id"]) if patch.get("详情") else ("" if selected_detail == str(row["row_id"]) else selected_detail)
+    drafts = st.session_state.setdefault(drafts_key, {})
+    dirty = set(st.session_state.setdefault(dirty_key, []))
+    changed_ids = {str(row.get("row_id") or "") for row in changed}
+    dirty.difference_update(changed_ids)
+    dirty.update(apply_editor_changes(rows, changed, drafts, state_items))
+    st.session_state[dirty_key] = sorted(dirty)
+    st.session_state[detail_key] = selected_detail
+    # A fresh key rebuilds the grid from the just-persisted drafts. This avoids
+    # Streamlit reconciling a new data frame with stale SelectboxColumn deltas.
+    st.session_state[editor_version_key] = int(st.session_state.get(editor_version_key, 0)) + 1
 
 
 def _matches(item: dict[str, Any], review: dict[str, Any], source: str, field: str, ai: str, review_status: str, search: str) -> bool:
@@ -114,7 +150,8 @@ def render_compact_review(task_dir, review_dir, task_id: str, items: list[dict[s
     for row in rows:
         row["详情"] = row["row_id"] == selected_detail
     frame = pd.DataFrame(rows)
-    edited = st.data_editor(
+    editor_key = f"review-editor-{task_id}-{page}-{page_size}-{source}-{field}-{ai}-{review_status}-{search}-{int(st.session_state.get(editor_version_key, 0))}"
+    st.data_editor(
         frame,
         hide_index=True,
         width="stretch",
@@ -133,11 +170,11 @@ def render_compact_review(task_dir, review_dir, task_id: str, items: list[dict[s
             "审核备注": st.column_config.TextColumn("审核备注", width=210),
             "详情": st.column_config.CheckboxColumn("详情", width=55),
         },
-        key=f"review-editor-{task_id}-{page}-{page_size}-{source}-{field}-{ai}-{review_status}-{search}-{int(st.session_state.get(editor_version_key, 0))}",
+        key=editor_key,
+        on_change=_capture_editor_changes,
+        args=(editor_key, rows, state_items, drafts_key, dirty_key, detail_key, editor_version_key),
     )
-    page_dirty = apply_editor_changes(rows, edited.to_dict("records"), drafts, state_items) if rows else set()
-    dirty.update(page_dirty)
-    st.session_state[dirty_key] = sorted(dirty)
+    dirty = set(st.session_state.get(dirty_key, []))
     st.caption(f"筛选结果：{len(filtered)}条｜第{page}/{pages}页｜未保存修改：{len(dirty)}条")
 
     st.caption("审核修改会跨分页暂存在当前页面中；点击下方按钮会一次保存全部未保存修改。")
@@ -151,14 +188,6 @@ def render_compact_review(task_dir, review_dir, task_id: str, items: list[dict[s
         except (ReviewConflictError, ReviewLockError) as exc:
             st.error(str(exc))
 
-    checked = [str(row["row_id"]) for row in edited.to_dict("records") if row.get("详情")]
-    new_detail = choose_exclusive_detail(checked, selected_detail)
-    if not checked and selected_detail not in {str(row["row_id"]) for row in rows}:
-        new_detail = selected_detail
-    if new_detail != selected_detail:
-        st.session_state[detail_key] = new_detail
-        st.session_state[editor_version_key] = int(st.session_state.get(editor_version_key, 0)) + 1
-        st.rerun()
     if selected_detail:
         selected_item = next((item for item in items if item["item_id"] == selected_detail), None)
         if selected_item:

@@ -11,6 +11,7 @@ from core.confluence_task_store import add_sources, update_source
 from core.review_store import acquire_review_lock, create_task_meta, init_review_state, load_review_state, update_task_meta
 from core.review_table import PENDING_REVIEW_LABEL, TABLE_RESULTS, apply_editor_changes, choose_exclusive_detail, review_result_display, save_dirty_reviews, signal_name_display, table_row
 from core.task_progress import ACTIVE_STATUSES, allowed_admin_actions, beijing_time, build_task_progress, choose_default_task, overall_percent
+from ui import review_table as review_table_ui
 from ui.review_table import chinese_review_stats, filter_review_items
 
 
@@ -126,6 +127,26 @@ def test_signal_names_merge_only_when_equal_and_detail_is_exclusive() -> None:
     assert choose_exclusive_detail(["old", "new"], "old") == "new"
     assert choose_exclusive_detail(["new", "old"], "old") == "new"
     assert choose_exclusive_detail([], "old") == ""
+
+
+def test_editor_callback_keeps_consecutive_row_selections(monkeypatch) -> None:
+    rows = [
+        {"row_id": "a", "审核结果": PENDING_REVIEW_LABEL, "审核备注": "", "详情": False},
+        {"row_id": "b", "审核结果": PENDING_REVIEW_LABEL, "审核备注": "", "详情": False},
+    ]
+    state_items = {"a": {"manual_review_result": "", "manual_note": ""}, "b": {"manual_review_result": "", "manual_note": ""}}
+    session = {
+        "editor-a": {"edited_rows": {0: {"审核结果": review_result_display("确认真实差异")}}},
+        "drafts": {}, "dirty": [], "detail": "", "version": 0,
+    }
+    monkeypatch.setattr(review_table_ui.st, "session_state", session)
+    review_table_ui._capture_editor_changes("editor-a", rows, state_items, "drafts", "dirty", "detail", "version")
+    assert session["drafts"]["a"]["manual_review_result"] == "确认真实差异"
+    session["editor-b"] = {"edited_rows": {1: {"审核结果": review_result_display("确认可忽略")}}}
+    review_table_ui._capture_editor_changes("editor-b", rows, state_items, "drafts", "dirty", "detail", "version")
+    assert session["drafts"]["a"]["manual_review_result"] == "确认真实差异"
+    assert session["drafts"]["b"]["manual_review_result"] == "确认可忽略"
+    assert session["dirty"] == ["a", "b"]
 
 
 def test_dirty_batch_save_preserves_lock_and_revision(tmp_path: Path) -> None:
