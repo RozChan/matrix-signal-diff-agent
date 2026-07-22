@@ -9,9 +9,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.confluence_task_store import add_sources, update_source
 from core.review_store import acquire_review_lock, create_task_meta, init_review_state, load_review_state, update_task_meta
-from core.review_table import TABLE_RESULTS, apply_editor_changes, save_dirty_reviews, table_row
+from core.review_table import PENDING_REVIEW_LABEL, TABLE_RESULTS, apply_editor_changes, review_result_display, save_dirty_reviews, table_row
 from core.task_progress import ACTIVE_STATUSES, allowed_admin_actions, beijing_time, build_task_progress, choose_default_task, overall_percent
-from ui.review_table import filter_review_items
+from ui.review_table import chinese_review_stats, filter_review_items
 
 
 def make_task(tmp_path: Path, task_id: str = "task1") -> Path:
@@ -24,6 +24,7 @@ def review_item(item_id: str, *, judgement: str = "疑似可忽略") -> dict:
     return {
         "item_id": item_id, "signal_40": f"A-{item_id}", "signal_51": f"B-{item_id}",
         "source_sheet": "完全同名匹配对比结果", "diff_fields": ["信号值描述"], "diff_field_count": 1,
+        "field_diffs": [{"diff_field": "信号值描述", "value_40": "Key not stored", "value_51": "SC or SK not stored"}],
         "signal_ai_judgement": judgement, "signal_ai_suggested_action": "建议人工确认", "confidence": "中",
     }
 
@@ -85,20 +86,36 @@ def test_review_table_defaults_to_pending_and_keeps_stable_row_ids(tmp_path: Pat
     assert [item["item_id"] for item in filtered] == ["pending"]
     all_rows = [table_row(item, state["items"][item["item_id"]], idx + 1) for idx, item in enumerate(items)]
     assert [row["row_id"] for row in all_rows] == ["pending", "default"]
+    assert "4.0=Key not stored" in all_rows[0]["差异"] and "5.1=SC or SK not stored" in all_rows[0]["差异"]
     assert tuple(TABLE_RESULTS) == ("确认真实差异", "确认可忽略", "确认错别字", "确认语义一致", "存疑待确认")
 
 
 def test_editor_drafts_only_mark_changed_rows() -> None:
     rows = [{"row_id": "a"}, {"row_id": "b"}]
     edited = [
-        {"row_id": "a", "审核结果": "确认可忽略", "审核备注": "note", "查看详情": True},
-        {"row_id": "b", "审核结果": "确认真实差异", "审核备注": "", "查看详情": False},
+        {"row_id": "a", "审核结果": review_result_display("确认可忽略"), "审核备注": "note"},
+        {"row_id": "b", "审核结果": review_result_display("确认真实差异"), "审核备注": ""},
     ]
     state_items = {"a": {"manual_review_result": "", "manual_note": ""}, "b": {"manual_review_result": "确认真实差异", "manual_note": ""}}
     drafts = {}
     dirty = apply_editor_changes(rows, edited, drafts, state_items)
     assert dirty == {"a"}
-    assert drafts["a"]["show_detail"] is True
+    assert drafts["a"]["manual_review_result"] == "确认可忽略"
+
+
+def test_pending_and_ai_suspected_ignore_filters_are_distinct(tmp_path: Path) -> None:
+    items = [review_item(f"ignore-{index}") for index in range(8)] + [review_item(f"unknown-{index}", judgement="无法判断") for index in range(4)]
+    state = init_review_state(tmp_path / "review", "task", items)
+    assert len(filter_review_items(items, state["items"], review_status="待人工确认")) == 12
+    assert len(filter_review_items(items, state["items"], review_status="AI判断疑似可忽略")) == 8
+    assert len(filter_review_items(items, state["items"], review_status="AI无法判断")) == 4
+
+
+def test_review_result_prompt_and_chinese_statistics() -> None:
+    assert review_result_display("") == PENDING_REVIEW_LABEL
+    assert review_result_display("确认真实差异").startswith("🟢 已审核")
+    translated = chinese_review_stats({"total": 12, "priority_review": 8, "pending_manual": 12, "updated_at": "2026-07-22T02:00:00+00:00"})
+    assert translated == {"审核项总数": 12, "AI判断疑似可忽略": 8, "待人工确认": 12, "最后更新时间": "2026-07-22 10:00:00"}
 
 
 def test_dirty_batch_save_preserves_lock_and_revision(tmp_path: Path) -> None:

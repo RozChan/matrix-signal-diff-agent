@@ -8,12 +8,31 @@ from typing import Any
 from .review_store import MANUAL_REVIEW_RESULTS, load_review_state, update_review_item
 
 TABLE_RESULTS = tuple(MANUAL_REVIEW_RESULTS)
+PENDING_REVIEW_LABEL = "🔴 待选择（点击此处审核）"
 
 
-def diff_summary(item: dict[str, Any], limit: int = 100) -> str:
-    fields = "、".join(item.get("diff_fields") or [])
-    summary = f"{fields}（{int(item.get('diff_field_count') or 0)}项）"
-    return summary if len(summary) <= limit else summary[: limit - 1] + "…"
+def review_result_display(value: Any) -> str:
+    result = str(value or "")
+    return f"🟢 已审核｜{result}" if result in TABLE_RESULTS else PENDING_REVIEW_LABEL
+
+
+def review_result_value(value: Any) -> str:
+    text = str(value or "")
+    if text == PENDING_REVIEW_LABEL:
+        return ""
+    prefix = "🟢 已审核｜"
+    return text[len(prefix) :] if text.startswith(prefix) else text
+
+
+def diff_summary(item: dict[str, Any], limit: int | None = None) -> str:
+    parts = []
+    for diff in item.get("field_diffs") or []:
+        field = str(diff.get("diff_field") or "未解析")
+        value40 = str(diff.get("value_40") or "<空>").replace("\n", " ↵ ")
+        value51 = str(diff.get("value_51") or "<空>").replace("\n", " ↵ ")
+        parts.append(f"{field}：4.0={value40}；5.1={value51}")
+    summary = "｜".join(parts) or "未解析到具体差异"
+    return summary if limit is None or len(summary) <= limit else summary[: limit - 1] + "…"
 
 
 def table_row(item: dict[str, Any], review: dict[str, Any], sequence: int, draft: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -25,12 +44,11 @@ def table_row(item: dict[str, Any], review: dict[str, Any], sequence: int, draft
         "5.1信号名": str(item.get("signal_51") or ""),
         "来源Sheet": str(item.get("source_sheet") or ""),
         "差异字段": "、".join(item.get("diff_fields") or []),
-        "差异摘要": diff_summary(item),
-        "AI建议": str(item.get("signal_ai_suggested_action") or item.get("signal_ai_judgement") or ""),
+        "差异": diff_summary(item),
+        "AI判断": str(item.get("signal_ai_judgement") or ""),
         "AI置信度": str(item.get("confidence") or ""),
-        "审核结果": draft.get("manual_review_result", review.get("manual_review_result", "")),
+        "审核结果": review_result_display(draft.get("manual_review_result", review.get("manual_review_result", ""))),
         "审核备注": draft.get("manual_note", review.get("manual_note", "")),
-        "查看详情": bool(draft.get("show_detail", False)),
     }
 
 
@@ -42,9 +60,9 @@ def apply_editor_changes(rows: list[dict[str, Any]], edited_rows: list[dict[str,
         if row_id not in valid_ids:
             continue
         review = state_items.get(row_id, {})
-        result = str(edited.get("审核结果") or "")
+        result = review_result_value(edited.get("审核结果"))
         note = str(edited.get("审核备注") or "")
-        drafts[row_id] = {"manual_review_result": result, "manual_note": note, "show_detail": bool(edited.get("查看详情"))}
+        drafts[row_id] = {"manual_review_result": result, "manual_note": note}
         if result != str(review.get("manual_review_result") or "") or note != str(review.get("manual_note") or ""):
             dirty.add(row_id)
     return dirty

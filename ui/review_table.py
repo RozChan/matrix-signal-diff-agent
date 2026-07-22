@@ -9,7 +9,7 @@ import pandas as pd
 import streamlit as st
 
 from core.review_store import ReviewConflictError, ReviewLockError, compute_review_stats, load_review_state, update_task_meta
-from core.review_table import TABLE_RESULTS, apply_editor_changes, pending_review_count, save_dirty_reviews, table_row
+from core.review_table import PENDING_REVIEW_LABEL, TABLE_RESULTS, apply_editor_changes, pending_review_count, review_result_display, save_dirty_reviews, table_row
 from core.task_progress import beijing_time
 
 
@@ -24,7 +24,9 @@ def _matches(item: dict[str, Any], review: dict[str, Any], source: str, field: s
         return False
     if review_status == "人工已修改" and review.get("review_source") != "manual":
         return False
-    if review_status == "AI建议可忽略" and item.get("signal_ai_judgement") != "疑似可忽略":
+    if review_status == "AI判断疑似可忽略" and (review.get("reviewed") or item.get("signal_ai_judgement") != "疑似可忽略"):
+        return False
+    if review_status == "AI无法判断" and (review.get("reviewed") or item.get("signal_ai_judgement") not in {"无法判断", "未启用"}):
         return False
     needle = search.strip().casefold()
     return not needle or needle in str(item.get("signal_40") or "").casefold() or needle in str(item.get("signal_51") or "").casefold()
@@ -32,6 +34,16 @@ def _matches(item: dict[str, Any], review: dict[str, Any], source: str, field: s
 
 def filter_review_items(items: list[dict[str, Any]], state_items: dict[str, Any], *, source: str = "全部", field: str = "全部", ai: str = "全部", review_status: str = "待人工确认", search: str = "") -> list[dict[str, Any]]:
     return [item for item in items if _matches(item, state_items.get(item["item_id"], {}), source, field, ai, review_status, search)]
+
+
+def chinese_review_stats(stats: dict[str, Any]) -> dict[str, Any]:
+    labels = {
+        "total": "审核项总数", "priority_review": "AI判断疑似可忽略", "pending_manual": "待人工确认",
+        "system_default_keep": "系统默认保留", "manual_modified": "人工已修改", "confirmed_real_diff": "确认真实差异",
+        "ignored": "确认可忽略", "typo": "确认错别字", "semantic_same": "确认语义一致", "uncertain": "存疑待确认",
+        "diff_field_total": "差异字段总数", "avg_diff_fields_per_signal": "平均每个信号差异字段数", "updated_at": "最后更新时间",
+    }
+    return {labels.get(key, key): (beijing_time(value) if key == "updated_at" else value) for key, value in stats.items()}
 
 
 def _render_detail(item: dict[str, Any], review: dict[str, Any], display_text: Callable[[Any], str]) -> None:
@@ -63,25 +75,24 @@ def render_compact_review(task_dir, review_dir, task_id: str, items: list[dict[s
         f"待确认：{stats.get('pending_manual', 0)}　人工修改：{stats.get('manual_modified', 0)}　最后保存：{beijing_time(stats.get('updated_at'))}"
     )
     with st.expander("查看任务统计", expanded=False):
-        st.json(stats)
+        st.json(chinese_review_stats(stats))
 
     sources = ["全部", *sorted({str(item.get("source_sheet") or "") for item in items if item.get("source_sheet")})]
     fields = ["全部", *sorted({str(field) for item in items for field in (item.get("diff_fields") or [])})]
     ai_values = ["全部", *sorted({str(item.get("signal_ai_judgement") or "") for item in items if item.get("signal_ai_judgement")})]
-    f1, f2, f3, f4, f5 = st.columns([1, 1, 1, 1, 1.4])
+    f1, f2, f3, f4, f5, page_col, size_col = st.columns([1, 1, 1, 1.15, 1.25, .65, .75])
     source = f1.selectbox("来源Sheet", sources, key=f"table-source-{task_id}")
     field = f2.selectbox("差异字段", fields, key=f"table-field-{task_id}")
     ai = f3.selectbox("AI判断", ai_values, key=f"table-ai-{task_id}")
-    review_status = f4.selectbox("审核状态", ["待人工确认", "AI建议可忽略", "人工已修改", "查看全部"], key=f"table-status-{task_id}")
+    review_status = f4.selectbox("审核状态", ["待人工确认", "AI判断疑似可忽略", "AI无法判断", "人工已修改", "查看全部"], key=f"table-status-{task_id}")
     search = f5.text_input("搜索信号名", key=f"table-search-{task_id}")
+    page_size = int(size_col.selectbox("每页条数", [20, 50, 100], index=0, key=f"table-page-size-{task_id}"))
     filtered = filter_review_items(items, state_items, source=source, field=field, ai=ai, review_status=review_status, search=search)
 
     drafts_key = f"review-drafts-{task_id}"
     dirty_key = f"review-dirty-{task_id}"
     drafts = st.session_state.setdefault(drafts_key, {})
     dirty = set(st.session_state.setdefault(dirty_key, []))
-    page_col, size_col, _ = st.columns([1, 1, 3])
-    page_size = int(size_col.selectbox("每页条数", [20, 50, 100], index=0, key=f"table-page-size-{task_id}"))
     pages = max(1, math.ceil(len(filtered) / page_size))
     page = int(page_col.number_input("页码", 1, pages, 1, key=f"table-page-{task_id}"))
     start = (page - 1) * page_size
@@ -91,14 +102,14 @@ def render_compact_review(task_dir, review_dir, task_id: str, items: list[dict[s
     edited = st.data_editor(
         frame,
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
         height=min(720, 38 * (len(rows) + 1) + 8),
-        disabled=["row_id", "序号", "4.0信号名", "5.1信号名", "来源Sheet", "差异字段", "差异摘要", "AI建议", "AI置信度", *([] if can_edit else ["审核结果", "审核备注"])],
+        disabled=["row_id", "序号", "4.0信号名", "5.1信号名", "来源Sheet", "差异字段", "差异", "AI判断", "AI置信度", *([] if can_edit else ["审核结果", "审核备注"])],
         column_config={
             "row_id": None,
-            "审核结果": st.column_config.SelectboxColumn("审核结果", options=["", *TABLE_RESULTS], required=False),
+            "差异": st.column_config.TextColumn("具体差异（4.0 / 5.1）", width="large"),
+            "审核结果": st.column_config.SelectboxColumn("👉 审核结果（请点击选择）", options=[PENDING_REVIEW_LABEL, *[review_result_display(result) for result in TABLE_RESULTS]], required=True, width="medium"),
             "审核备注": st.column_config.TextColumn("审核备注", width="medium"),
-            "查看详情": st.column_config.CheckboxColumn("详情"),
         },
         key=f"review-editor-{task_id}-{page}-{page_size}-{source}-{field}-{ai}-{review_status}-{search}",
     )
@@ -107,9 +118,10 @@ def render_compact_review(task_dir, review_dir, task_id: str, items: list[dict[s
     st.session_state[dirty_key] = sorted(dirty)
     st.caption(f"筛选结果：{len(filtered)}条｜第{page}/{pages}页｜未保存修改：{len(dirty)}条")
 
-    detail_rows = [row for row in edited.to_dict("records") if row.get("查看详情")] if rows else []
-    if detail_rows:
-        selected_id = str(detail_rows[-1]["row_id"])
+    detail_options = [""] + [str(row["row_id"]) for row in edited.to_dict("records")]
+    detail_labels = {"": "不查看详情", **{str(row["row_id"]): f"{row['序号']}. {row['4.0信号名']} ⇄ {row['5.1信号名']}" for row in edited.to_dict("records")}}
+    selected_id = st.selectbox("查看单条完整详情（同时只能选择一条）", detail_options, format_func=lambda value: detail_labels[value], key=f"review-detail-{task_id}-{page}") if rows else ""
+    if selected_id:
         selected_item = next(item for item in items if item["item_id"] == selected_id)
         _render_detail(selected_item, state_items.get(selected_id, {}), display_text)
 
