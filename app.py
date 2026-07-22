@@ -727,8 +727,6 @@ def _show_admin_page() -> None:
 
 def main() -> None:
     st.set_page_config(page_title="EEA 4.0/5.1 矩阵同一信号差异识别工具", layout="wide")
-    st.title("EEA 4.0/5.1 矩阵同一信号差异识别工具")
-    st.caption("本地 Streamlit Demo：封装 legacy 脚本流程；AI 复核仅作为人工审核参考，最终以人工审核结果为准。")
     view = str(st.query_params.get("view", ""))
     if view == "admin":
         _show_admin_page()
@@ -747,6 +745,9 @@ def main() -> None:
             return
         st.session_state["current_task_id"] = str(query_task_id)
         st.success("飞书审核链接校验通过，已自动加载任务。")
+    else:
+        st.title("EEA 4.0/5.1 矩阵同一信号差异识别工具")
+        st.caption("本地 Streamlit Demo：封装 legacy 脚本流程；AI 复核仅作为人工审核参考，最终以人工审核结果为准。")
     _show_history_loader(hide_history=feishu_link_mode)
     if not feishu_link_mode:
         enable_ai_review = _show_ai_config()

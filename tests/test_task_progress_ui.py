@@ -114,8 +114,8 @@ def test_pending_and_ai_suspected_ignore_filters_are_distinct(tmp_path: Path) ->
 
 def test_review_result_prompt_and_chinese_statistics() -> None:
     assert review_result_display("") == PENDING_REVIEW_LABEL
-    assert review_result_display("确认真实差异") == "🟢 确认真实差异 | 已审核"
-    assert review_result_display("确认可忽略") == "🟢 确认可忽略　 | 已审核"
+    assert review_result_display("确认真实差异") == "🟢 确认真实差异"
+    assert review_result_display("确认可忽略") == "🟢 确认可忽略"
     translated = chinese_review_stats({"total": 12, "priority_review": 8, "pending_manual": 12, "updated_at": "2026-07-22T02:00:00+00:00"})
     assert translated == {"审核项总数": 12, "AI判断疑似可忽略": 8, "待人工确认": 12, "最后更新时间": "2026-07-22 10:00:00"}
 

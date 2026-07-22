@@ -8,23 +8,22 @@ from typing import Any
 from .review_store import MANUAL_REVIEW_RESULTS, load_review_state, update_review_item
 
 TABLE_RESULTS = tuple(MANUAL_REVIEW_RESULTS)
-PENDING_REVIEW_LABEL = "🔴 待选择　　　| 未审核"
+PENDING_REVIEW_LABEL = "🔴 待选择"
 
 
 def review_result_display(value: Any) -> str:
     result = str(value or "")
     if result not in TABLE_RESULTS:
         return PENDING_REVIEW_LABEL
-    padded = result + ("　" if len(result) < 6 else "")
-    return f"🟢 {padded} | 已审核"
+    return f"🟢 {result}"
 
 
 def review_result_value(value: Any) -> str:
     text = str(value or "")
     if text == PENDING_REVIEW_LABEL:
         return ""
-    if text.startswith("🟢 ") and " | 已审核" in text:
-        return text.removeprefix("🟢 ").removesuffix(" | 已审核").strip()
+    if text.startswith("🟢 "):
+        return text.removeprefix("🟢 ").strip()
     return text
 
 
