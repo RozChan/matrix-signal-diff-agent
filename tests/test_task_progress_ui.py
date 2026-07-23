@@ -12,7 +12,7 @@ from core.review_store import acquire_review_lock, compute_review_stats, create_
 from core.review_table import PENDING_REVIEW_LABEL, apply_editor_changes, field_rows, pending_review_count, result_display, save_dirty_reviews
 from core.task_progress import ACTIVE_STATUSES, allowed_admin_actions, beijing_time, build_task_progress, choose_default_task, overall_percent
 from ui import review_table as review_table_ui
-from ui.review_table import chinese_review_stats, initialize_review_session, review_phase, system_difference_rows
+from ui.review_table import chinese_review_stats, field_editor_key, initialize_review_session, review_phase, system_difference_rows
 
 
 def make_task(tmp_path: Path, task_id: str = "task1") -> Path:
@@ -133,13 +133,20 @@ def test_editor_callback_keeps_consecutive_selections(monkeypatch) -> None:
         {"row_id": "b::信号值描述", "item_id": "b", "field_key": "信号值描述", "人工确认": PENDING_REVIEW_LABEL, "详情": False},
     ]
     state_items = {key: {"field_reviews": {"信号值描述": {"result": ""}}} for key in ("a", "b")}
-    session = {"editor-a": {"edited_rows": {0: {"人工确认": result_display("信号值描述", "same")}}}, "drafts": {}, "dirty": [], "detail": "", "version": 0}
+    session = {"editor": {"edited_rows": {0: {"人工确认": result_display("信号值描述", "same")}}}, "drafts": {}, "dirty": [], "detail": "", "version": 0}
     monkeypatch.setattr(review_table_ui.st, "session_state", session)
-    review_table_ui._capture_editor_changes("editor-a", rows, state_items, "drafts", "dirty", "detail", "version")
-    session["editor-b"] = {"edited_rows": {1: {"人工确认": result_display("信号值描述", "different")}}}
-    review_table_ui._capture_editor_changes("editor-b", rows, state_items, "drafts", "dirty", "detail", "version")
+    review_table_ui._capture_editor_changes("editor", rows, state_items, "drafts", "dirty", "detail", "version")
+    assert session["editor"]["edited_rows"] == {}
+    session["editor"]["edited_rows"] = {1: {"人工确认": result_display("信号值描述", "different")}}
+    review_table_ui._capture_editor_changes("editor", rows, state_items, "drafts", "dirty", "detail", "version")
     assert session["drafts"]["a::信号值描述"]["result"] == "same"
     assert session["drafts"]["b::信号值描述"]["result"] == "different"
+    assert session["dirty"] == ["a::信号值描述", "b::信号值描述"]
+
+
+def test_editor_key_is_stable_across_review_edits() -> None:
+    assert field_editor_key("信号值描述", "task", 1) == field_editor_key("信号值描述", "task", 1)
+    assert field_editor_key("信号值描述", "task", 1) != field_editor_key("信号值描述", "task", 2)
 
 
 def test_dirty_batch_save_preserves_lock_and_revision(tmp_path: Path) -> None:

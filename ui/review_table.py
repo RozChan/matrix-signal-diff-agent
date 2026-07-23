@@ -25,6 +25,12 @@ def initialize_review_session(session_state: Any, task_id: str) -> tuple[str, st
     return drafts_key, dirty_key, detail_key, version_key, drafts
 
 
+def field_editor_key(field_name: str, task_id: str, page: int) -> str:
+    """Keep the grid identity stable across edits so frontend sorting is retained."""
+
+    return f"field-editor-{field_name}-{task_id}-{page}"
+
+
 def review_phase(items: list[dict[str, Any]], state_items: dict[str, Any]) -> tuple[str, int, int]:
     """Return the sequential manual-review phase and pending counts."""
 
@@ -101,7 +107,10 @@ def _capture_editor_changes(editor_key: str, rows: list[dict[str, Any]], state_i
     dirty.update(apply_editor_changes(rows, changed, drafts, state_items))
     st.session_state[dirty_key] = sorted(dirty)
     st.session_state[detail_key] = selected
-    st.session_state[version_key] = int(st.session_state.get(version_key, 0)) + 1
+    # The captured deltas now live in drafts. Consume them so the same widget
+    # key can safely render draft-backed data without replaying stale patches.
+    edited_rows.clear()
+    st.session_state.setdefault(version_key, 0)
 
 
 def _render_detail(item: dict[str, Any], field_key: str, review: dict[str, Any], display_text: Callable[[Any], str]) -> None:
@@ -129,10 +138,10 @@ def _render_field_table(field_name: str, task_id: str, items: list[dict[str, Any
         st.info(f"本任务没有{field_name}差异。")
         return
 
-    c1, c2, c3 = st.columns([2.2, .8, .9])
+    c1, c2, c3, p1, p2, p3 = st.columns([1.55, .82, .5, .28, .38, .28], gap="small")
     search = c1.text_input("搜索信号名", key=f"field-search-{field_name}-{task_id}")
-    page_size = int(c2.number_input("每页条数", 1, 500, 20, key=f"field-size-{field_name}-{task_id}"))
-    status = c3.selectbox("确认状态", ["待确认", "查看全部", "已确认"], key=f"field-status-{field_name}-{task_id}")
+    status = c2.selectbox("确认状态", ["待确认", "查看全部", "已确认"], key=f"field-status-{field_name}-{task_id}")
+    page_size = int(c3.number_input("每页条数", 1, 500, 20, key=f"field-size-{field_name}-{task_id}"))
     needle = search.strip().casefold()
     filtered = [row for row in rows if (not needle or needle in row["EEA4.0信号名"].casefold() or needle in row["EEA5.1信号名"].casefold())]
     if status == "待确认":
@@ -144,11 +153,12 @@ def _render_field_table(field_name: str, task_id: str, items: list[dict[str, Any
     page_key = f"field-page-{field_name}-{task_id}"
     page = max(1, min(int(st.session_state.get(page_key, 1)), pages))
     st.session_state[page_key] = page
-    p1, p2, p3, spacer = st.columns([.55, .7, .55, 8])
+    p1.markdown("<div style='height:28px'>页码</div>", unsafe_allow_html=True)
     if p1.button("◀", disabled=page == 1, key=f"prev-{field_name}-{task_id}"):
         st.session_state[page_key] = page - 1
         st.rerun()
-    p2.markdown(f"<div style='text-align:center;padding-top:8px'>{page}/{pages}</div>", unsafe_allow_html=True)
+    p2.markdown(f"<div style='height:28px'></div><div style='text-align:center;padding-top:8px;white-space:nowrap'>{page}/{pages}</div>", unsafe_allow_html=True)
+    p3.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
     if p3.button("▶", disabled=page == pages, key=f"next-{field_name}-{task_id}"):
         st.session_state[page_key] = page + 1
         st.rerun()
@@ -158,7 +168,7 @@ def _render_field_table(field_name: str, task_id: str, items: list[dict[str, Any
     for row in page_rows:
         row["详情"] = row["row_id"] == selected
     frame = pd.DataFrame(page_rows)
-    editor_key = f"field-editor-{field_name}-{task_id}-{page}-{int(st.session_state.get(version_key, 0))}"
+    editor_key = field_editor_key(field_name, task_id, page)
     st.data_editor(
         frame, hide_index=True, width="stretch", height=min(720, 38 * (len(page_rows) + 1) + 8),
         disabled=["row_id", "item_id", "field_key", "序号", "EEA4.0信号名", "EEA5.1信号名", f"EEA4.0{field_name}", f"EEA5.1{field_name}", "AI判断结果", *([] if can_edit else ["人工确认"])],
