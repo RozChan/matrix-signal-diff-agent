@@ -20,6 +20,7 @@ REVIEW_LOG_FILE = "review_log.jsonl"
 TASK_META_FILE = "task_meta.json"
 
 FIELD_REVIEW_RESULTS = {"same", "different"}
+MANUAL_TEXT_FIELDS = {"信号值描述", "单位"}
 SIGNAL_AI_JUDGEMENTS = ["真实差异", "疑似可忽略", "无法判断", "未启用"]
 SYSTEM_DEFAULT_SOURCE = "system_default"
 MANUAL_SOURCE = "manual"
@@ -324,17 +325,40 @@ def iter_item_fields(item: dict[str, Any]) -> list[dict[str, Any]]:
     return fields
 
 
+def is_manual_text_review_item(item: dict[str, Any]) -> bool:
+    """Return true only for description/unit-only signals without other differences."""
+
+    fields = iter_item_fields(item)
+    return bool(fields) and all(
+        diff.get("field_type") == "text" and diff.get("diff_field") in MANUAL_TEXT_FIELDS
+        for diff in fields
+    )
+
+
+def manual_text_review_kind(item: dict[str, Any]) -> str:
+    if not is_manual_text_review_item(item):
+        return ""
+    names = {str(diff.get("diff_field") or "") for diff in iter_item_fields(item)}
+    if names == {"信号值描述"}:
+        return "description_only"
+    if names == {"单位"}:
+        return "unit_only"
+    if names == MANUAL_TEXT_FIELDS:
+        return "description_and_unit"
+    return ""
+
+
 def get_default_review_state(item: dict[str, Any]) -> dict[str, Any]:
     now = utc_now_iso()
+    system_different = any(diff.get("field_type") == "numeric" for diff in iter_item_fields(item))
     field_reviews: dict[str, dict[str, Any]] = {}
     for diff in iter_item_fields(item):
-        numeric = diff.get("field_type") == "numeric"
         field_reviews[diff["field_key"]] = {
             "diff_field": diff.get("diff_field") or "未解析",
-            "result": "different" if numeric else "",
-            "reviewed": numeric,
-            "decision_source": SYSTEM_DEFAULT_SOURCE if numeric else "",
-            "reviewed_at": now if numeric else "",
+            "result": "different" if system_different else "",
+            "reviewed": system_different,
+            "decision_source": SYSTEM_DEFAULT_SOURCE if system_different else "",
+            "reviewed_at": now if system_different else "",
             "updated_at": now,
             "reviewer": "",
         }
@@ -350,7 +374,8 @@ def _normalize_review_entry(entry: dict[str, Any], item: dict[str, Any] | None =
     for key, value in existing_fields.items():
         if isinstance(value, dict):
             current = dict(merged.get(key, {}))
-            current.update(value)
+            if current.get("decision_source") != SYSTEM_DEFAULT_SOURCE:
+                current.update(value)
             current["result"] = str(current.get("result") or "")
             current["reviewed"] = bool(current.get("reviewed") and current["result"] in FIELD_REVIEW_RESULTS)
             merged[key] = current
@@ -539,10 +564,16 @@ def compute_review_stats(items: list[dict[str, Any]], state: dict[str, Any]) -> 
     stats: dict[str, int | float | str] = {
         "signal_total": len(items), "field_total": total_fields, "pending_manual": 0,
         "manual_same": 0, "manual_different": 0, "system_different": 0,
-        "manual_confirmed": 0,
+        "manual_confirmed": 0, "description_only_signals": 0, "unit_only_signals": 0,
+        "description_and_unit_signals": 0, "numeric_difference_signals": 0,
         "updated_at": state.get("updated_at", "") if isinstance(state, dict) else "",
     }
     for item in items:
+        kind = manual_text_review_kind(item)
+        if kind:
+            stats[f"{kind}_signals"] += 1
+        if any(diff.get("field_type") == "numeric" for diff in iter_item_fields(item)):
+            stats["numeric_difference_signals"] += 1
         review = _normalize_review_entry(state_items.get(item.get("item_id"), {}), item)
         for field_review in review.get("field_reviews", {}).values():
             result = field_review.get("result", "")

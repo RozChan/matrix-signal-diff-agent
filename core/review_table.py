@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .review_store import load_review_state, update_review_field
+from .review_store import is_manual_text_review_item, load_review_state, update_review_field
 
 PENDING_REVIEW_LABEL = "🔴 待选择"
 FIELD_RESULTS = ("same", "different")
@@ -35,6 +35,8 @@ def field_rows(items: list[dict[str, Any]], state_items: dict[str, Any], field_n
     rows: list[dict[str, Any]] = []
     sequence = 0
     for item in items:
+        if not is_manual_text_review_item(item):
+            continue
         item_review = state_items.get(str(item.get("item_id") or ""), {})
         reviews = item_review.get("field_reviews", {})
         occurrences: dict[str, int] = {}

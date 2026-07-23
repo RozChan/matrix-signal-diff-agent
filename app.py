@@ -31,7 +31,7 @@ from core.admin_tasks import admin_system_status, admin_token_valid, cancel_admi
 from core.task_progress import allowed_admin_actions, beijing_time, build_task_progress, choose_default_task, status_label, trigger_label
 from core.review_table import pending_review_count
 from ui.admin_progress import render_live_task_progress
-from ui.review_table import render_compact_review
+from ui.review_table import render_compact_review, render_system_differences
 from core.review_store import (
     acquire_review_lock,
     begin_final_generation,
@@ -496,6 +496,7 @@ def _show_review_workspace() -> None:
     state, dirty_count = render_compact_review(task_dir, review_dir, task_id, items, state, can_edit=can_edit, session_id=session_id, display_text=_display_text)
     pending_count = pending_review_count(state)
     _show_final_export(task_dir, review_dir, session_id=session_id, can_edit=can_edit, dirty_count=dirty_count, pending_count=pending_count)
+    render_system_differences(items)
     _show_downloads(task_dir)
 
 

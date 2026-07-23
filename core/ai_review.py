@@ -140,6 +140,16 @@ def _build_signal_item(source_sheet: str, signal_40: str, signal_51: str, diff_t
     }
 
 
+def is_text_only_ai_candidate(item: dict[str, Any]) -> bool:
+    """Only description/unit-only signals are eligible for semantic AI review."""
+
+    field_diffs = item.get("field_diffs") or []
+    return bool(field_diffs) and all(
+        diff.get("field_type") == "text" and diff.get("diff_field") in TEXT_REVIEW_FIELDS
+        for diff in field_diffs
+    )
+
+
 def _iter_signal_items(wb) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for source_sheet in SOURCE_SHEETS:
@@ -250,7 +260,7 @@ def _ai_review(item: dict[str, Any]) -> dict[str, str]:
 def get_signal_level_ai_judgement(item: dict[str, Any], enable_ai: bool, llm_enabled: bool, stats: dict[str, Any]) -> dict[str, str]:
     if item.get("has_numeric_diff"):
         return _system_real_diff_review(item)
-    if not item.get("has_text_diff"):
+    if not is_text_only_ai_candidate(item):
         return _unknown_review("差异字段未解析或不属于可复核文本字段，需人工确认。")
     if not enable_ai or not llm_enabled:
         return _disabled_review()
@@ -341,7 +351,7 @@ def run_ai_review(compare_file_path: Path, enable_ai: bool = False, progress_cal
     signal_items = _iter_signal_items(wb)
     total_signals = len(signal_items)
     total_fields = sum(int(item.get("diff_field_count") or 0) for item in signal_items)
-    ai_required_signals = sum(1 for item in signal_items if not item.get("has_numeric_diff") and item.get("has_text_diff"))
+    ai_required_signals = sum(1 for item in signal_items if is_text_only_ai_candidate(item))
     system_direct_signals = total_signals - ai_required_signals
     if not enable_ai or not llm_enabled:
         emit(
@@ -380,7 +390,7 @@ def run_ai_review(compare_file_path: Path, enable_ai: bool = False, progress_cal
         )
         review = get_signal_level_ai_judgement(item, enable_ai, llm_enabled, stats)
         _stats_increment(stats, item, review)
-        if review.get("ai_reviewed") == "是" or (enable_ai and llm_enabled and not item.get("has_numeric_diff") and item.get("has_text_diff")):
+        if review.get("ai_reviewed") == "是" or (enable_ai and llm_enabled and is_text_only_ai_candidate(item)):
             ai_completed += 1
         completed += 1
         ws.append([

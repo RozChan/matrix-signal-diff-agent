@@ -25,11 +25,57 @@ def initialize_review_session(session_state: Any, task_id: str) -> tuple[str, st
     return drafts_key, dirty_key, detail_key, version_key, drafts
 
 
+def review_phase(items: list[dict[str, Any]], state_items: dict[str, Any]) -> tuple[str, int, int]:
+    """Return the sequential manual-review phase and pending counts."""
+
+    description_rows = field_rows(items, state_items, "信号值描述")
+    unit_rows = field_rows(items, state_items, "单位")
+    description_pending = sum(row["人工确认"] == PENDING_REVIEW_LABEL for row in description_rows)
+    unit_pending = sum(row["人工确认"] == PENDING_REVIEW_LABEL for row in unit_rows)
+    if description_pending:
+        return "description", description_pending, unit_pending
+    if unit_pending:
+        return "unit", 0, unit_pending
+    return "complete", 0, 0
+
+
+def system_difference_rows(items: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """Build one read-only row for every signal containing a numeric difference."""
+
+    rows: list[dict[str, str]] = []
+    for item in items:
+        numeric = [diff for diff in item.get("field_diffs") or [] if diff.get("field_type") == "numeric"]
+        if not numeric:
+            continue
+        rows.append({
+            "EEA4.0信号名": str(item.get("signal_40") or "<空>"),
+            "EEA5.1信号名": str(item.get("signal_51") or "<空>"),
+            "数值差异字段": "、".join(str(diff.get("diff_field") or "") for diff in numeric),
+            "具体差异（4.0 / 5.1）": "｜".join(
+                f"{diff.get('diff_field')}：4.0={diff.get('value_40') or '<空>'}；5.1={diff.get('value_51') or '<空>'}"
+                for diff in numeric
+            ),
+            "判定结果": "系统判定不同",
+        })
+    return rows
+
+
+def render_system_differences(items: list[dict[str, Any]]) -> None:
+    rows = system_difference_rows(items)
+    st.subheader(f"系统判定真实差异（含数值差异的信号，共{len(rows)}条）")
+    if not rows:
+        st.info("本任务没有包含数值差异的信号。")
+        return
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch", height=min(600, 38 * (len(rows) + 1) + 8))
+
+
 def chinese_review_stats(stats: dict[str, Any]) -> dict[str, Any]:
     labels = {
         "signal_total": "信号总数", "field_total": "差异字段总数", "pending_manual": "待人工确认字段数",
         "manual_same": "人工确认相同", "manual_different": "人工确认不同",
         "system_different": "系统判定不同", "manual_confirmed": "人工已确认字段数", "updated_at": "最后更新时间",
+        "description_only_signals": "仅信号值描述差异信号数", "unit_only_signals": "仅单位差异信号数",
+        "description_and_unit_signals": "信号值描述+单位差异信号数", "numeric_difference_signals": "包含数值差异信号数",
     }
     return {labels.get(key, key): (beijing_time(value) if key == "updated_at" else value) for key, value in stats.items()}
 
@@ -138,14 +184,29 @@ def render_compact_review(task_dir, review_dir, task_id: str, items: list[dict[s
     with st.expander("查看任务统计", expanded=False):
         st.json(chinese_review_stats(stats))
 
-    drafts_key, dirty_key, detail_key, version_key, drafts = initialize_review_session(st.session_state, task_id)
-    has_units = bool(field_rows(items, state.get("items", {}), "单位", drafts))
-    tabs = st.tabs(["信号值描述待确认清单", "单位待确认清单"] if has_units else ["信号值描述待确认清单"])
-    with tabs[0]:
+    drafts_key, dirty_key, detail_key, version_key, _drafts = initialize_review_session(st.session_state, task_id)
+    state_items = state.get("items", {})
+    phase, description_pending, unit_pending = review_phase(items, state_items)
+    has_descriptions = bool(field_rows(items, state_items, "信号值描述"))
+    has_units = bool(field_rows(items, state_items, "单位"))
+    if phase == "description":
+        st.info(f"请先完成信号值描述确认；完成并保存后再进入单位确认。当前剩余 {description_pending} 项。")
         _render_field_table("信号值描述", task_id, items, state, can_edit, drafts_key, dirty_key, detail_key, version_key)
-    if has_units:
-        with tabs[1]:
-            _render_field_table("单位", task_id, items, state, can_edit, drafts_key, dirty_key, detail_key, version_key)
+    elif phase == "unit":
+        st.success("信号值描述确认已完成。")
+        st.info(f"请完成单位确认。当前剩余 {unit_pending} 项。")
+        _render_field_table("单位", task_id, items, state, can_edit, drafts_key, dirty_key, detail_key, version_key)
+        if has_descriptions:
+            with st.expander("查看或修改已完成的信号值描述确认", expanded=False):
+                _render_field_table("信号值描述", task_id, items, state, can_edit, drafts_key, dirty_key, detail_key, version_key)
+    else:
+        st.success("所有需要人工确认的信号值描述和单位均已完成。")
+        if has_descriptions:
+            with st.expander("查看或修改信号值描述确认", expanded=False):
+                _render_field_table("信号值描述", task_id, items, state, can_edit, drafts_key, dirty_key, detail_key, version_key)
+        if has_units:
+            with st.expander("查看或修改单位确认", expanded=False):
+                _render_field_table("单位", task_id, items, state, can_edit, drafts_key, dirty_key, detail_key, version_key)
 
     dirty = set(st.session_state.setdefault(dirty_key, []))
     if st.button("保存所有未保存修改", disabled=not can_edit or not dirty, key=f"save-fields-{task_id}", type="primary"):

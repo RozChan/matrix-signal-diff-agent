@@ -8,11 +8,11 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.confluence_task_store import add_sources, update_source
-from core.review_store import acquire_review_lock, create_task_meta, init_review_state, update_task_meta
+from core.review_store import acquire_review_lock, compute_review_stats, create_task_meta, init_review_state, update_task_meta
 from core.review_table import PENDING_REVIEW_LABEL, apply_editor_changes, field_rows, pending_review_count, result_display, save_dirty_reviews
 from core.task_progress import ACTIVE_STATUSES, allowed_admin_actions, beijing_time, build_task_progress, choose_default_task, overall_percent
 from ui import review_table as review_table_ui
-from ui.review_table import chinese_review_stats, initialize_review_session
+from ui.review_table import chinese_review_stats, initialize_review_session, review_phase, system_difference_rows
 
 
 def make_task(tmp_path: Path, task_id: str = "task1") -> Path:
@@ -21,10 +21,12 @@ def make_task(tmp_path: Path, task_id: str = "task1") -> Path:
     return tdir
 
 
-def review_item(item_id: str, *, with_unit: bool = False) -> dict:
+def review_item(item_id: str, *, with_unit: bool = False, with_numeric: bool = False) -> dict:
     diffs = [{"diff_field": "信号值描述", "value_40": "Key not stored", "value_51": "SC or SK not stored", "field_type": "text"}]
     if with_unit:
         diffs.append({"diff_field": "单位", "value_40": "Nm", "value_51": "N·m", "field_type": "text"})
+    if with_numeric:
+        diffs.append({"diff_field": "信号长度", "value_40": "8", "value_51": "12", "field_type": "numeric"})
     return {
         "item_id": item_id, "signal_40": f"A-{item_id}", "signal_51": f"B-{item_id}",
         "source_sheet": "完全同名匹配对比结果", "diff_fields": [d["diff_field"] for d in diffs],
@@ -83,6 +85,37 @@ def test_description_and_unit_rows_have_required_columns_and_stable_ids(tmp_path
     ]
     assert description[0]["人工确认"] == PENDING_REVIEW_LABEL
     assert pending_review_count(state) == 2
+
+
+def test_numeric_signals_are_excluded_from_manual_tables_and_listed_as_system_differences(tmp_path: Path) -> None:
+    items = [review_item("text"), review_item("mixed", with_numeric=True)]
+    state = init_review_state(tmp_path / "review", "task", items)
+    assert [row["item_id"] for row in field_rows(items, state["items"], "信号值描述")] == ["text"]
+    assert pending_review_count(state) == 1
+    [system_row] = system_difference_rows(items)
+    assert system_row["EEA4.0信号名"] == "A-mixed"
+    assert system_row["数值差异字段"] == "信号长度"
+
+
+def test_review_phase_requires_descriptions_before_units(tmp_path: Path) -> None:
+    items = [review_item("description"), review_item("both", with_unit=True), review_item("unit", with_unit=True)]
+    # Make the third item unit-only.
+    items[2]["field_diffs"] = [items[2]["field_diffs"][1]]
+    items[2]["diff_fields"] = ["单位"]
+    state = init_review_state(tmp_path / "review", "task", items)
+    stats = compute_review_stats(items, state)
+    assert stats["description_only_signals"] == 1
+    assert stats["unit_only_signals"] == 1
+    assert stats["description_and_unit_signals"] == 1
+    assert review_phase(items, state["items"]) == ("description", 2, 2)
+    for item_id in ("description", "both"):
+        field = state["items"][item_id]["field_reviews"]["信号值描述"]
+        field.update(result="same", reviewed=True, decision_source="manual")
+    assert review_phase(items, state["items"]) == ("unit", 0, 2)
+    for item_id in ("both", "unit"):
+        field = state["items"][item_id]["field_reviews"]["单位"]
+        field.update(result="same", reviewed=True, decision_source="manual")
+    assert review_phase(items, state["items"]) == ("complete", 0, 0)
 
 
 def test_binary_editor_drafts_only_mark_changed_fields() -> None:
