@@ -19,7 +19,7 @@ REVIEW_STATE_FILE = "review_state.json"
 REVIEW_LOG_FILE = "review_log.jsonl"
 TASK_META_FILE = "task_meta.json"
 
-MANUAL_REVIEW_RESULTS = ["确认真实差异", "确认可忽略", "确认错别字", "确认语义一致", "存疑待确认"]
+FIELD_REVIEW_RESULTS = {"same", "different"}
 SIGNAL_AI_JUDGEMENTS = ["真实差异", "疑似可忽略", "无法判断", "未启用"]
 SYSTEM_DEFAULT_SOURCE = "system_default"
 MANUAL_SOURCE = "manual"
@@ -309,55 +309,52 @@ def load_review_items(review_dir: Path) -> list[dict[str, Any]]:
     return _read_json(_review_items_path(Path(review_dir)), [])
 
 
+def iter_item_fields(item: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return stable field identities for field-level review and export."""
+
+    counts: dict[str, int] = {}
+    fields: list[dict[str, Any]] = []
+    for position, raw in enumerate(item.get("field_diffs") or [], start=1):
+        diff = dict(raw)
+        name = str(diff.get("diff_field") or "未解析")
+        counts[name] = counts.get(name, 0) + 1
+        key = name if counts[name] == 1 else f"{name}#{counts[name]}"
+        diff.update(field_key=key, position=position)
+        fields.append(diff)
+    return fields
+
+
 def get_default_review_state(item: dict[str, Any]) -> dict[str, Any]:
-    judgement = str(item.get("signal_ai_judgement") or "").strip()
     now = utc_now_iso()
-    if judgement == "真实差异":
-        return {
-            "manual_review_result": "确认真实差异",
-            "manual_note": "",
-            "reviewed": True,
-            "review_source": SYSTEM_DEFAULT_SOURCE,
-            "default_review_result": "确认真实差异",
-            "default_reason": "AI或规则判断该信号存在真实差异，系统默认保留；人工可修改",
-            "reviewed_at": now,
+    field_reviews: dict[str, dict[str, Any]] = {}
+    for diff in iter_item_fields(item):
+        numeric = diff.get("field_type") == "numeric"
+        field_reviews[diff["field_key"]] = {
+            "diff_field": diff.get("diff_field") or "未解析",
+            "result": "different" if numeric else "",
+            "reviewed": numeric,
+            "decision_source": SYSTEM_DEFAULT_SOURCE if numeric else "",
+            "reviewed_at": now if numeric else "",
             "updated_at": now,
             "reviewer": "",
         }
-    if judgement == "疑似可忽略":
-        reason = "AI判断该信号差异疑似可忽略，需人工优先确认"
-    else:
-        reason = "AI未给出可直接采用的结论，需人工确认"
-    return {
-        "manual_review_result": "",
-        "manual_note": "",
-        "reviewed": False,
-        "review_source": "",
-        "default_review_result": "",
-        "default_reason": reason,
-        "reviewed_at": "",
-        "updated_at": now,
-        "reviewer": "",
-    }
+    return {"field_reviews": field_reviews, "updated_at": now}
 
 
 def _normalize_review_entry(entry: dict[str, Any], item: dict[str, Any] | None = None) -> dict[str, Any]:
     normalized = dict(entry) if isinstance(entry, dict) else {}
     default = get_default_review_state(item or {})
-    result = str(normalized.get("manual_review_result") or "").strip()
-    source = str(normalized.get("review_source") or "").strip()
-    if not source:
-        source = MANUAL_SOURCE if result else ""
-    normalized["review_source"] = source
-    normalized.setdefault("manual_review_result", result)
-    normalized.setdefault("manual_note", "")
-    normalized.setdefault("default_review_result", default.get("default_review_result", ""))
-    normalized.setdefault("default_reason", default.get("default_reason", ""))
-    normalized.setdefault("reviewed_at", "")
     normalized.setdefault("updated_at", normalized.get("reviewed_at") or utc_now_iso())
-    normalized.setdefault("reviewer", "")
-    if "reviewed" not in normalized:
-        normalized["reviewed"] = bool(result)
+    existing_fields = normalized.get("field_reviews") if isinstance(normalized.get("field_reviews"), dict) else {}
+    merged = dict(default.get("field_reviews", {}))
+    for key, value in existing_fields.items():
+        if isinstance(value, dict):
+            current = dict(merged.get(key, {}))
+            current.update(value)
+            current["result"] = str(current.get("result") or "")
+            current["reviewed"] = bool(current.get("reviewed") and current["result"] in FIELD_REVIEW_RESULTS)
+            merged[key] = current
+    normalized["field_reviews"] = merged
     return normalized
 
 
@@ -365,7 +362,7 @@ def init_review_state(review_dir: Path, task_id: str, items: list[dict[str, Any]
     review_path = Path(review_dir)
     item_list = items if items is not None else load_review_items(review_path)
     existing = load_review_state(review_path) if _review_state_path(review_path).exists() and not overwrite else {"items": {}}
-    state = {"task_id": existing.get("task_id") or task_id, "updated_at": existing.get("updated_at") or utc_now_iso(), "revision": int(existing.get("revision") or 0), "items": dict(existing.get("items", {}))}
+    state = {"schema_version": 2, "task_id": existing.get("task_id") or task_id, "updated_at": existing.get("updated_at") or utc_now_iso(), "revision": int(existing.get("revision") or 0), "items": dict(existing.get("items", {}))}
     changed = overwrite or not _review_state_path(review_path).exists()
     for item in item_list:
         item_id = item.get("item_id")
@@ -377,10 +374,6 @@ def init_review_state(review_dir: Path, task_id: str, items: list[dict[str, Any]
             changed = True
         else:
             normalized = _normalize_review_entry(current, item)
-            if normalized.get("review_source") != MANUAL_SOURCE and not normalized.get("manual_review_result"):
-                default_state = get_default_review_state(item)
-                if default_state.get("manual_review_result"):
-                    normalized = default_state
             if normalized != current:
                 state["items"][item_id] = normalized
                 changed = True
@@ -394,6 +387,7 @@ def load_review_state(review_dir: Path) -> dict[str, Any]:
     state.setdefault("task_id", "")
     state.setdefault("updated_at", "")
     state.setdefault("revision", 0)
+    state.setdefault("schema_version", 2)
     state.setdefault("items", {})
     state["items"] = {item_id: _normalize_review_entry(entry) for item_id, entry in state.get("items", {}).items()}
     return state
@@ -416,19 +410,19 @@ def append_review_log(review_dir: Path, entry: dict[str, Any]) -> None:
         fh.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
 
 
-def update_review_item(
+def update_review_field(
     review_dir: Path,
     task_id: str,
     item_id: str,
-    manual_review_result: str,
-    manual_note: str,
+    field_key: str,
+    result: str,
     reviewer: str = "",
     *,
     base_revision: int | None = None,
     session_id: str = "",
 ) -> dict[str, Any]:
-    if manual_review_result and manual_review_result not in MANUAL_REVIEW_RESULTS:
-        raise ValueError(f"不支持的人工审核结果：{manual_review_result}")
+    if result not in FIELD_REVIEW_RESULTS:
+        raise ValueError(f"不支持的字段确认结果：{result}")
     with get_task_lock(_task_dir_from_review_dir(Path(review_dir))):
         if session_id:
             ensure_review_lock_holder(_task_dir_from_review_dir(Path(review_dir)), session_id)
@@ -437,23 +431,26 @@ def update_review_item(
             raise ReviewConflictError("审核数据已被其他用户更新，请刷新页面")
         if not state.get("task_id"):
             state["task_id"] = task_id
-        previous = _normalize_review_entry(state.setdefault("items", {}).get(item_id, {}))
+        item_review = _normalize_review_entry(state.setdefault("items", {}).get(item_id, {}))
+        if field_key not in item_review.get("field_reviews", {}):
+            raise ValueError(f"审核字段不存在：{field_key}")
+        previous = dict(item_review["field_reviews"][field_key])
         now = utc_now_iso()
-        state["items"][item_id] = {
-            "manual_review_result": manual_review_result,
-            "manual_note": manual_note,
+        item_review["field_reviews"][field_key] = {
+            **previous,
+            "result": result,
             "reviewed": True,
-            "review_source": MANUAL_SOURCE,
-            "default_review_result": previous.get("default_review_result", ""),
-            "default_reason": previous.get("default_reason", ""),
+            "decision_source": MANUAL_SOURCE,
             "reviewed_at": now,
             "updated_at": now,
             "reviewer": reviewer,
         }
+        item_review["updated_at"] = now
+        state["items"][item_id] = item_review
         save_review_state(review_dir, state, increment_revision=True)
         state = load_review_state(review_dir)
     try:
-        append_review_log(review_dir, {"task_id": task_id, "item_id": item_id, "action": "update_review", "manual_review_result": manual_review_result, "manual_note": manual_note})
+        append_review_log(review_dir, {"task_id": task_id, "item_id": item_id, "field_key": field_key, "diff_field": previous.get("diff_field", ""), "action": "update_field_review", "old_result": previous.get("result", ""), "new_result": result, "reviewer": reviewer})
     except OSError:
         pass
     return state
@@ -521,70 +518,40 @@ def begin_final_generation(task_dir: Path, session_id: str) -> dict[str, Any]:
 
 
 def review_badge(item: dict[str, Any], review: dict[str, Any]) -> str:
-    if review.get("review_source") == MANUAL_SOURCE:
-        return "人工已修改"
-    if review.get("review_source") == SYSTEM_DEFAULT_SOURCE and review.get("manual_review_result") == "确认真实差异":
-        return "系统默认保留"
-    if item.get("signal_ai_judgement") == "疑似可忽略":
-        return "需人工优先确认"
+    fields = review.get("field_reviews", {})
+    if any(value.get("decision_source") == MANUAL_SOURCE for value in fields.values()):
+        return "人工已确认"
+    if all(value.get("reviewed") for value in fields.values()):
+        return "系统判定"
     return "待人工确认"
 
 
 def review_sort_key(item: dict[str, Any], review: dict[str, Any]) -> tuple[int, str, str, str]:
-    source = review.get("review_source", "")
-    result = review.get("manual_review_result", "")
-    judgement = item.get("signal_ai_judgement", "")
-    if judgement == "疑似可忽略" and source != MANUAL_SOURCE:
-        priority = 0
-    elif judgement in {"无法判断", "未启用"} and not result:
-        priority = 1
-    elif source == MANUAL_SOURCE:
-        priority = 2
-    elif judgement == "真实差异" and source == SYSTEM_DEFAULT_SOURCE:
-        priority = 3
-    else:
-        priority = 4
+    fields = review.get("field_reviews", {})
+    pending = any(not value.get("reviewed") for value in fields.values())
+    priority = 0 if pending else 1
     return (priority, item.get("source_sheet", ""), item.get("signal_40", ""), item.get("signal_51", ""))
 
 
 def compute_review_stats(items: list[dict[str, Any]], state: dict[str, Any]) -> dict[str, int | float | str]:
     state_items = state.get("items", {}) if isinstance(state, dict) else {}
-    total_fields = sum(int(item.get("diff_field_count") or len(item.get("field_diffs", [])) or 0) for item in items)
+    total_fields = sum(len(iter_item_fields(item)) for item in items)
     stats: dict[str, int | float | str] = {
-        "total": len(items),
-        "priority_review": 0,
-        "pending_manual": 0,
-        "system_default_keep": 0,
-        "manual_modified": 0,
-        "confirmed_real_diff": 0,
-        "ignored": 0,
-        "typo": 0,
-        "semantic_same": 0,
-        "uncertain": 0,
-        "diff_field_total": total_fields,
-        "avg_diff_fields_per_signal": round(total_fields / len(items), 2) if items else 0,
+        "signal_total": len(items), "field_total": total_fields, "pending_manual": 0,
+        "manual_same": 0, "manual_different": 0, "system_different": 0,
+        "manual_confirmed": 0,
         "updated_at": state.get("updated_at", "") if isinstance(state, dict) else "",
     }
     for item in items:
         review = _normalize_review_entry(state_items.get(item.get("item_id"), {}), item)
-        result = review.get("manual_review_result", "")
-        source = review.get("review_source", "")
-        if item.get("signal_ai_judgement") == "疑似可忽略" and source != MANUAL_SOURCE:
-            stats["priority_review"] = int(stats["priority_review"]) + 1
-        if not review.get("reviewed"):
-            stats["pending_manual"] = int(stats["pending_manual"]) + 1
-        if source == SYSTEM_DEFAULT_SOURCE and result == "确认真实差异":
-            stats["system_default_keep"] = int(stats["system_default_keep"]) + 1
-        if source == MANUAL_SOURCE:
-            stats["manual_modified"] = int(stats["manual_modified"]) + 1
-        if result == "确认真实差异":
-            stats["confirmed_real_diff"] = int(stats["confirmed_real_diff"]) + 1
-        elif result == "确认可忽略":
-            stats["ignored"] = int(stats["ignored"]) + 1
-        elif result == "确认错别字":
-            stats["typo"] = int(stats["typo"]) + 1
-        elif result == "确认语义一致":
-            stats["semantic_same"] = int(stats["semantic_same"]) + 1
-        elif result == "存疑待确认":
-            stats["uncertain"] = int(stats["uncertain"]) + 1
+        for field_review in review.get("field_reviews", {}).values():
+            result = field_review.get("result", "")
+            source = field_review.get("decision_source", "")
+            if not field_review.get("reviewed"):
+                stats["pending_manual"] += 1
+            elif source == SYSTEM_DEFAULT_SOURCE and result == "different":
+                stats["system_different"] += 1
+            elif source == MANUAL_SOURCE:
+                stats["manual_confirmed"] += 1
+                stats["manual_same" if result == "same" else "manual_different"] += 1
     return stats

@@ -28,40 +28,27 @@ from core.result_notifier import build_results_zip
 from core.result_access import allowed_result_files, ensure_result_access, result_token_valid
 from core.notification_router import notify_result_ready
 from core.admin_tasks import admin_system_status, admin_token_valid, cancel_admin_task, create_admin_full_compare, list_admin_tasks, retry_admin_confluence, safe_task_dir
-from core.task_progress import ACTIVE_STATUSES, allowed_admin_actions, beijing_time, build_task_progress, choose_default_task, status_label, trigger_label
+from core.task_progress import allowed_admin_actions, beijing_time, build_task_progress, choose_default_task, status_label, trigger_label
 from core.review_table import pending_review_count
 from ui.admin_progress import render_live_task_progress
 from ui.review_table import render_compact_review
 from core.review_store import (
-    MANUAL_REVIEW_RESULTS,
-    append_review_log,
     acquire_review_lock,
     begin_final_generation,
-    compute_review_stats,
     create_task_meta,
     generate_review_items_from_excel,
     init_review_state,
     load_review_items,
-    load_review_state,
     load_task_meta,
     heartbeat_review_lock,
     is_signal_level_item,
-    review_badge,
-    review_sort_key,
-    ReviewConflictError,
     ReviewLockError,
-    update_review_item,
     update_task_meta,
 )
 
 APP_ROOT = Path(__file__).resolve().parent
 TEMP_ROOT = Path(os.getenv("TASK_ROOT_DIR", str(APP_ROOT / "temp"))).expanduser().resolve()
 ALLOWED_EXTENSIONS = {".xlsx", ".xlsm"}
-SOURCE_FILTERS = ["全部", "完全同名匹配对比结果", "vcu-hcu 同名匹配"]
-FIELD_FILTERS = ["全部", "信号长度", "精度", "偏移量", "物理最小值", "物理最大值", "单位", "信号值描述", "未解析"]
-AI_FILTERS = ["全部", "真实差异", "疑似可忽略", "无法判断", "未启用"]
-REVIEW_SOURCE_FILTERS = ["全部", "需人工优先确认", "系统默认保留", "人工已修改", "待人工确认"]
-MANUAL_STATUS_FILTERS = ["全部", "待人工确认", "已有结论", "人工已修改", "系统默认结论", *MANUAL_REVIEW_RESULTS]
 REVIEW_LOCK_READY_STATUSES = {"awaiting_review", "reviewing"}
 
 
@@ -488,37 +475,6 @@ def _show_new_task(enable_ai_review: bool) -> None:
                 st.code(traceback.format_exc(), language="text")
 
 
-def _filter_items(items: list[dict], state: dict, filters: dict[str, str]) -> list[dict]:
-    state_items = state.get("items", {})
-    out = []
-    for item in items:
-        review = state_items.get(item.get("item_id"), {})
-        result = review.get("manual_review_result", "")
-        source = review.get("review_source", "")
-        badge = review_badge(item, review)
-        if filters["source"] != "全部" and item.get("source_sheet") != filters["source"]:
-            continue
-        if filters["field"] != "全部" and filters["field"] not in item.get("diff_fields", []):
-            continue
-        if filters["ai"] != "全部" and item.get("signal_ai_judgement") != filters["ai"]:
-            continue
-        if filters["review_source"] != "全部" and badge != filters["review_source"]:
-            continue
-        manual = filters["manual"]
-        if manual == "待人工确认" and review.get("reviewed"):
-            continue
-        if manual == "已有结论" and not result:
-            continue
-        if manual == "人工已修改" and source != "manual":
-            continue
-        if manual == "系统默认结论" and source != "system_default":
-            continue
-        if manual in MANUAL_REVIEW_RESULTS and result != manual:
-            continue
-        out.append(item)
-    return out
-
-
 def _show_review_workspace() -> None:
     task_id = st.session_state.get("current_task_id")
     if not task_id:
@@ -541,30 +497,6 @@ def _show_review_workspace() -> None:
     pending_count = pending_review_count(state)
     _show_final_export(task_dir, review_dir, session_id=session_id, can_edit=can_edit, dirty_count=dirty_count, pending_count=pending_count)
     _show_downloads(task_dir)
-
-
-def _show_batch_actions(task_dir: Path, review_dir: Path, task_id: str, filtered: list[dict], state: dict, *, can_edit: bool, session_id: str) -> None:
-    with st.expander("批量操作（可选，谨慎使用）", expanded=False):
-        st.warning("批量操作只会作用于当前筛选结果中的“需人工优先确认”且未审核记录，不会批量改动系统默认保留的真实差异。")
-        result = st.selectbox("批量设置结果", ["确认可忽略", "存疑待确认"], key=f"batch-result-{task_id}", disabled=not can_edit)
-        confirm = st.checkbox("我确认要批量更新当前筛选结果中的未审核记录", key=f"batch-confirm-{task_id}", disabled=not can_edit)
-        if st.button("执行批量更新", disabled=(not confirm or not can_edit), key=f"batch-apply-{task_id}"):
-            state_items = state.get("items", {})
-            count = 0
-            for item in filtered:
-                item_id = item["item_id"]
-                review = state_items.get(item_id, {})
-                if review.get("reviewed") or review_badge(item, review) != "需人工优先确认":
-                    continue
-                update_review_item(review_dir, task_id, item_id, result, "批量操作生成", session_id=session_id)
-                count += 1
-            try:
-                append_review_log(review_dir, {"task_id": task_id, "action": "batch_update", "manual_review_result": result, "count": count})
-            except OSError:
-                st.warning("批量审核日志写入失败，但审核状态已保存。")
-            update_task_meta(task_dir, status="reviewing")
-            st.success(f"已批量更新 {count} 条。")
-            st.rerun()
 
 
 def _show_final_export(task_dir: Path, review_dir: Path, *, session_id: str, can_edit: bool, dirty_count: int = 0, pending_count: int = 0) -> None:
