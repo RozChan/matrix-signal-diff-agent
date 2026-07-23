@@ -13,6 +13,18 @@ from core.review_table import PENDING_REVIEW_LABEL, apply_editor_changes, field_
 from core.task_progress import beijing_time
 
 
+def initialize_review_session(session_state: Any, task_id: str) -> tuple[str, str, str, str, dict[str, Any]]:
+    """Initialize every task-scoped review key before the first table render."""
+
+    drafts_key, dirty_key = f"review-drafts-{task_id}", f"review-dirty-{task_id}"
+    detail_key, version_key = f"review-detail-{task_id}", f"review-version-{task_id}"
+    drafts = session_state.setdefault(drafts_key, {})
+    session_state.setdefault(dirty_key, [])
+    session_state.setdefault(detail_key, "")
+    session_state.setdefault(version_key, 0)
+    return drafts_key, dirty_key, detail_key, version_key, drafts
+
+
 def chinese_review_stats(stats: dict[str, Any]) -> dict[str, Any]:
     labels = {
         "signal_total": "信号总数", "field_total": "差异字段总数", "pending_manual": "待人工确认字段数",
@@ -126,9 +138,8 @@ def render_compact_review(task_dir, review_dir, task_id: str, items: list[dict[s
     with st.expander("查看任务统计", expanded=False):
         st.json(chinese_review_stats(stats))
 
-    drafts_key, dirty_key = f"review-drafts-{task_id}", f"review-dirty-{task_id}"
-    detail_key, version_key = f"review-detail-{task_id}", f"review-version-{task_id}"
-    has_units = bool(field_rows(items, state.get("items", {}), "单位", st.session_state[drafts_key]))
+    drafts_key, dirty_key, detail_key, version_key, drafts = initialize_review_session(st.session_state, task_id)
+    has_units = bool(field_rows(items, state.get("items", {}), "单位", drafts))
     tabs = st.tabs(["信号值描述待确认清单", "单位待确认清单"] if has_units else ["信号值描述待确认清单"])
     with tabs[0]:
         _render_field_table("信号值描述", task_id, items, state, can_edit, drafts_key, dirty_key, detail_key, version_key)

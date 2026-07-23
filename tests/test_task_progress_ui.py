@@ -12,7 +12,7 @@ from core.review_store import acquire_review_lock, create_task_meta, init_review
 from core.review_table import PENDING_REVIEW_LABEL, apply_editor_changes, field_rows, pending_review_count, result_display, save_dirty_reviews
 from core.task_progress import ACTIVE_STATUSES, allowed_admin_actions, beijing_time, build_task_progress, choose_default_task, overall_percent
 from ui import review_table as review_table_ui
-from ui.review_table import chinese_review_stats
+from ui.review_table import chinese_review_stats, initialize_review_session
 
 
 def make_task(tmp_path: Path, task_id: str = "task1") -> Path:
@@ -129,3 +129,11 @@ def test_dirty_batch_save_preserves_lock_and_revision(tmp_path: Path) -> None:
 def test_chinese_stats_use_binary_labels() -> None:
     translated = chinese_review_stats({"signal_total": 12, "manual_same": 8, "manual_different": 2, "updated_at": "2026-07-22T02:00:00+00:00"})
     assert translated == {"信号总数": 12, "人工确认相同": 8, "人工确认不同": 2, "最后更新时间": "2026-07-22 10:00:00"}
+
+
+def test_review_session_keys_are_initialized_before_first_render() -> None:
+    session: dict = {}
+    drafts_key, dirty_key, detail_key, version_key, drafts = initialize_review_session(session, "new-task")
+    assert drafts_key == "review-drafts-new-task"
+    assert drafts == {}
+    assert session == {drafts_key: {}, dirty_key: [], detail_key: "", version_key: 0}
