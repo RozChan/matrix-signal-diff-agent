@@ -86,6 +86,11 @@ def chinese_review_stats(stats: dict[str, Any]) -> dict[str, Any]:
     return {labels.get(key, key): (beijing_time(value) if key == "updated_at" else value) for key, value in stats.items()}
 
 
+def render_review_stats(items: list[dict[str, Any]], state: dict[str, Any]) -> None:
+    with st.expander("查看任务统计", expanded=False):
+        st.json(chinese_review_stats(compute_review_stats(items, state)))
+
+
 def _capture_editor_changes(editor_key: str, rows: list[dict[str, Any]], state_items: dict[str, Any], drafts_key: str, dirty_key: str, detail_key: str, version_key: str) -> None:
     widget_state = st.session_state.get(editor_key) or {}
     edited_rows = widget_state.get("edited_rows") or {}
@@ -138,7 +143,7 @@ def _render_field_table(field_name: str, task_id: str, items: list[dict[str, Any
         st.info(f"本任务没有{field_name}差异。")
         return
 
-    c1, c2, c3, p1, p2, p3 = st.columns([1.55, .82, .5, .28, .38, .28], gap="small")
+    c1, c2, c3, p1, p2, p3, _spacer = st.columns([1.3, .7, .42, .16, .18, .16, 1.2], gap="small")
     search = c1.text_input("搜索信号名", key=f"field-search-{field_name}-{task_id}")
     status = c2.selectbox("确认状态", ["待确认", "查看全部", "已确认"], key=f"field-status-{field_name}-{task_id}")
     page_size = int(c3.number_input("每页条数", 1, 500, 20, key=f"field-size-{field_name}-{task_id}"))
@@ -191,8 +196,6 @@ def _render_field_table(field_name: str, task_id: str, items: list[dict[str, Any
 def render_compact_review(task_dir, review_dir, task_id: str, items: list[dict[str, Any]], state: dict[str, Any], *, can_edit: bool, session_id: str, display_text: Callable[[Any], str]) -> tuple[dict[str, Any], int]:
     stats = compute_review_stats(items, state)
     st.caption(f"任务：{task_id}　人工已确认：{stats['manual_confirmed']}　待确认：{stats['pending_manual']}　最后保存：{beijing_time(stats['updated_at'])}")
-    with st.expander("查看任务统计", expanded=False):
-        st.json(chinese_review_stats(stats))
 
     drafts_key, dirty_key, detail_key, version_key, _drafts = initialize_review_session(st.session_state, task_id)
     state_items = state.get("items", {})

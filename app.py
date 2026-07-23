@@ -31,7 +31,7 @@ from core.admin_tasks import admin_system_status, admin_token_valid, cancel_admi
 from core.task_progress import allowed_admin_actions, beijing_time, build_task_progress, choose_default_task, status_label, trigger_label
 from core.review_table import pending_review_count
 from ui.admin_progress import render_live_task_progress
-from ui.review_table import render_compact_review, render_system_differences
+from ui.review_table import render_compact_review, render_review_stats, render_system_differences
 from core.review_store import (
     acquire_review_lock,
     begin_final_generation,
@@ -146,7 +146,7 @@ def _auto_acquire_review_lock(task_dir: Path, task_id: str, session_id: str, met
     return is_editor, meta
 
 
-def _show_review_lock_panel(task_dir: Path, task_id: str, state: dict) -> tuple[bool, str, dict]:
+def _show_review_lock_panel(task_dir: Path, task_id: str, _state: dict | None = None) -> tuple[bool, str, dict]:
     session_id = _session_id(task_id)
     meta = load_task_meta(task_dir)
     is_editor, meta = _auto_acquire_review_lock(task_dir, task_id, session_id, meta)
@@ -161,7 +161,6 @@ def _show_review_lock_panel(task_dir: Path, task_id: str, state: dict) -> tuple[
                 f"当前审核人：{owner}",
                 f"锁定时间：{beijing_time(meta.get('review_locked_at'))}",
                 f"最近活动：{beijing_time(meta.get('review_lock_last_active_at'))}",
-                f"数据 revision：{state.get('revision', 0)}",
             ]
         )
     )
@@ -492,11 +491,12 @@ def _show_review_workspace() -> None:
         st.warning(f"当前任务 {task_id} 没有可审核数据。")
         return
 
-    can_edit, session_id, meta = _show_review_lock_panel(task_dir, task_id, state)
+    can_edit, session_id, meta = _show_review_lock_panel(task_dir, task_id)
     state, dirty_count = render_compact_review(task_dir, review_dir, task_id, items, state, can_edit=can_edit, session_id=session_id, display_text=_display_text)
     pending_count = pending_review_count(state)
     _show_final_export(task_dir, review_dir, session_id=session_id, can_edit=can_edit, dirty_count=dirty_count, pending_count=pending_count)
     render_system_differences(items)
+    render_review_stats(items, state)
     _show_downloads(task_dir)
 
 
@@ -661,6 +661,9 @@ def _show_admin_page() -> None:
 def main() -> None:
     st.set_page_config(page_title="EEA 4.0/5.1 矩阵同一信号差异识别工具", layout="wide")
     view = str(st.query_params.get("view", ""))
+    if not view and not st.query_params.get("task_id") and not st.query_params.get("token"):
+        st.query_params["view"] = "admin"
+        st.rerun()
     if view == "admin":
         _show_admin_page()
         return
@@ -678,7 +681,6 @@ def main() -> None:
             st.error("无权访问或审核链接无效。")
             return
         st.session_state["current_task_id"] = str(query_task_id)
-        st.success("飞书审核链接校验通过，已自动加载任务。")
     else:
         st.title("EEA 4.0/5.1 矩阵同一信号差异识别工具")
         st.caption("本地 Streamlit Demo：封装 legacy 脚本流程；AI 复核仅作为人工审核参考，最终以人工审核结果为准。")
