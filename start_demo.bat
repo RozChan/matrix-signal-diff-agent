@@ -38,6 +38,7 @@ if errorlevel 1 (
 )
 
 echo 正在启动 Streamlit，请稍候...
+echo 浏览器将打开：http://10.105.194.180:8501/?view=admin
 echo python -m streamlit run app.py >> "%LOG_FILE%"
 python -m streamlit run app.py
 set "EXIT_CODE=%ERRORLEVEL%"

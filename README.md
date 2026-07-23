@@ -560,13 +560,13 @@ output/人工审核后最终差异结果.xlsx
 start_demo.bat
 ```
 
-默认访问：
+默认会使用 `.streamlit/config.toml` 中配置的内网地址，并自动进入管理员页面：
 
 ```text
-http://localhost:8501
+http://10.105.194.180:8501/?view=admin
 ```
 
-适用于不接飞书时的本地上传、人工审核、历史任务恢复和结果下载。
+直接运行 `python -m streamlit run app.py`、`start_demo.bat` 或 `start_server.bat` 时均不会再自动打开 localhost。飞书审核链接和结果链接仍按各自 query 参数进入对应页面。
 
 #### 2. 内网审核服务模式
 
@@ -586,7 +586,7 @@ streamlit run app.py --server.address 0.0.0.0 --server.port 8501
 REVIEW_BASE_URL=http://工作站内网IP:8501
 ```
 
-代码不会写死 localhost 或内网 IP。
+审核和结果通知地址仍由 `REVIEW_BASE_URL` 控制；本机启动时自动打开的管理员地址由 `.streamlit/config.toml` 控制。
 
 #### 3. 飞书机器人模式
 

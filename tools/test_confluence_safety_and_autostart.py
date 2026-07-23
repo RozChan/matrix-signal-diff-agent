@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.confluence_client import ConfluenceClient, ConfluenceError
 from core.confluence_task_store import add_source, update_source
-from core.review_store import create_task_meta
+from core.review_store import create_task_meta, update_task_meta
 
 import bot_service
 
@@ -49,10 +49,18 @@ class RedirectSession:
 class FakeClient:
     def __init__(self) -> None:
         self.messages: list[str] = []
+        self.cards: list[str] = []
 
     def send_text(self, user_id: str, text: str):
         self.messages.append(text)
         return "msg"
+
+    def send_progress_card(self, card: dict, *, chat_id: str | None = None, open_id: str | None = None) -> str:
+        self.cards.append("create")
+        return "progress_msg"
+
+    def update_progress_card(self, message_id: str, card: dict) -> None:
+        self.cards.append(f"update:{message_id}")
 
 
 def _set_confluence_env() -> None:
@@ -101,6 +109,7 @@ def _make_task(root: Path) -> tuple[str, Path]:
     (tdir / "input" / "4.0").mkdir(parents=True)
     (tdir / "input" / "5.1").mkdir(parents=True)
     create_task_meta(tdir, task_id, status="created")
+    update_task_meta(tdir, source="feishu_confluence", feishu_chat_id="oc_chat", feishu_sender_id="ou_user")
     return task_id, tdir
 
 
@@ -125,7 +134,8 @@ def test_auto_start_when_all_sources_completed_and_files_ready() -> None:
         finally:
             bot_service._start_worker = old_start
         assert len(calls) == 1
-        assert any("正在自动开始" in msg for msg in fake.messages)
+        assert fake.cards
+        assert not any("正在自动开始" in msg for msg in fake.messages)
 
 
 def test_auto_start_requires_all_sources_completed() -> None:
