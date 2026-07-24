@@ -5,7 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .review_store import is_manual_text_review_item, load_review_state, update_review_field
+from .review_history import history_database_path, record_history_decisions
+from .review_store import is_manual_text_review_item, iter_item_fields, load_review_items, load_review_state, update_review_field
 
 PENDING_REVIEW_LABEL = "🔴 待选择"
 FIELD_RESULTS = ("same", "different")
@@ -91,6 +92,20 @@ def save_dirty_reviews(review_dir: Path, task_id: str, drafts: dict[str, dict[st
             reviewer=session_id, base_revision=revision, session_id=session_id,
         )
         revision = int(state.get("revision") or revision + 1)
+    items = {str(item.get("item_id") or ""): item for item in load_review_items(review_dir)}
+    history_rows: list[tuple[dict[str, Any], dict[str, Any], str]] = []
+    for row_id in sorted(dirty_ids):
+        draft = drafts[row_id]
+        item = items.get(str(draft["item_id"]))
+        if not item or not is_manual_text_review_item(item):
+            continue
+        diff = next((entry for entry in iter_item_fields(item) if entry["field_key"] == str(draft["field_key"])), None)
+        if diff:
+            history_rows.append((item, diff, str(draft["result"])))
+    record_history_decisions(
+        history_rows, task_id=task_id, reviewer=session_id,
+        db_path=history_database_path(review_dir),
+    )
     return state
 
 

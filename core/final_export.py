@@ -49,7 +49,7 @@ def _rows(items: list[dict[str, Any]], state_items: dict[str, Any]):
                 item.get("source_sheet", ""), item.get("signal_40", ""), item.get("signal_51", ""), diff.get("diff_field", ""),
                 diff.get("value_40", ""), diff.get("value_51", ""), item.get("signal_ai_judgement", ""), item.get("signal_ai_reason", ""),
                 _field_label(str(diff.get("diff_field") or "字段"), result),
-                "系统" if source == "system_default" else ("人工" if source == "manual" else "未确认"),
+                "系统" if source == "system_default" else ("历史人工" if source == "history_manual" else ("人工" if source == "manual" else "未确认")),
                 "是" if review.get("reviewed") else "否", review.get("reviewer", ""), review.get("reviewed_at", ""),
                 diff["field_key"], item.get("item_id", ""),
             ]

@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
-import math
+import importlib.util
 from typing import Any, Callable
 
 import pandas as pd
 import streamlit as st
+
+if importlib.util.find_spec("st_aggrid") is not None:
+    from st_aggrid import AgGrid, DataReturnMode, GridOptionsBuilder, JsCode
+else:  # pragma: no cover - rendered as an actionable deployment error
+    AgGrid = DataReturnMode = GridOptionsBuilder = JsCode = None
 
 from core.review_store import ReviewConflictError, ReviewLockError, compute_review_stats, load_review_state, update_task_meta
 from core.review_table import PENDING_REVIEW_LABEL, apply_editor_changes, field_rows, result_display, save_dirty_reviews
@@ -25,10 +30,10 @@ def initialize_review_session(session_state: Any, task_id: str) -> tuple[str, st
     return drafts_key, dirty_key, detail_key, version_key, drafts
 
 
-def field_editor_key(field_name: str, task_id: str, page: int) -> str:
-    """Keep the grid identity stable across edits so frontend sorting is retained."""
+def aggrid_key(field_name: str, task_id: str) -> str:
+    """Use one stable grid identity so AG Grid retains sorting across edits."""
 
-    return f"field-editor-{field_name}-{task_id}-{page}"
+    return f"review-aggrid-{field_name}-{task_id}"
 
 
 def review_phase(items: list[dict[str, Any]], state_items: dict[str, Any]) -> tuple[str, int, int]:
@@ -78,7 +83,7 @@ def render_system_differences(items: list[dict[str, Any]]) -> None:
 def chinese_review_stats(stats: dict[str, Any]) -> dict[str, Any]:
     labels = {
         "signal_total": "信号总数", "field_total": "差异字段总数", "pending_manual": "待人工确认字段数",
-        "manual_same": "人工确认相同", "manual_different": "人工确认不同",
+        "manual_same": "人工确认相同", "manual_different": "人工确认不同", "history_reused": "复用历史人工结论",
         "system_different": "系统判定不同", "manual_confirmed": "人工已确认字段数", "updated_at": "最后更新时间",
         "description_only_signals": "仅信号值描述差异信号数", "unit_only_signals": "仅单位差异信号数",
         "description_and_unit_signals": "信号值描述+单位差异信号数", "numeric_difference_signals": "包含数值差异信号数",
@@ -91,31 +96,69 @@ def render_review_stats(items: list[dict[str, Any]], state: dict[str, Any]) -> N
         st.json(chinese_review_stats(compute_review_stats(items, state)))
 
 
-def _capture_editor_changes(editor_key: str, rows: list[dict[str, Any]], state_items: dict[str, Any], drafts_key: str, dirty_key: str, detail_key: str, version_key: str) -> None:
-    widget_state = st.session_state.get(editor_key) or {}
-    edited_rows = widget_state.get("edited_rows") or {}
+def capture_grid_changes(
+    returned_rows: list[dict[str, Any]],
+    source_rows: list[dict[str, Any]],
+    state_items: dict[str, Any],
+    drafts: dict[str, dict[str, Any]],
+    dirty_ids: set[str],
+) -> set[str]:
+    """Merge AG Grid's sorted/filtered response by stable row_id, never by row position."""
+
+    source_by_id = {str(row.get("row_id") or ""): row for row in source_rows}
     changed: list[dict[str, Any]] = []
-    selected = str(st.session_state.get(detail_key) or "")
-    for raw_index, patch in edited_rows.items():
-        try:
-            row = dict(rows[int(raw_index)])
-        except (IndexError, TypeError, ValueError):
+    touched: set[str] = set()
+    for returned in returned_rows:
+        row_id = str(returned.get("row_id") or "")
+        source = source_by_id.get(row_id)
+        if not source or returned.get("人工确认") == source.get("人工确认"):
             continue
-        row.update(patch)
-        changed.append(row)
-        if "详情" in patch:
-            selected = row["row_id"] if patch["详情"] else ("" if selected == row["row_id"] else selected)
-    drafts = st.session_state.setdefault(drafts_key, {})
-    dirty = set(st.session_state.setdefault(dirty_key, []))
-    changed_ids = {row["row_id"] for row in changed}
-    dirty.difference_update(changed_ids)
-    dirty.update(apply_editor_changes(rows, changed, drafts, state_items))
-    st.session_state[dirty_key] = sorted(dirty)
-    st.session_state[detail_key] = selected
-    # The captured deltas now live in drafts. Consume them so the same widget
-    # key can safely render draft-backed data without replaying stale patches.
-    edited_rows.clear()
-    st.session_state.setdefault(version_key, 0)
+        changed.append({**source, "人工确认": returned.get("人工确认")})
+        touched.add(row_id)
+    dirty_ids.difference_update(touched)
+    dirty_ids.update(apply_editor_changes(source_rows, changed, drafts, state_items))
+    return dirty_ids
+
+
+def selected_grid_row_id(selected_rows: Any) -> str:
+    if selected_rows is None:
+        return ""
+    if isinstance(selected_rows, pd.DataFrame):
+        records = selected_rows.to_dict("records")
+    elif isinstance(selected_rows, list):
+        records = selected_rows
+    else:
+        records = []
+    return str(records[0].get("row_id") or "") if records else ""
+
+
+def _grid_options(frame: pd.DataFrame, field_name: str, can_edit: bool, page_size: int) -> dict[str, Any]:
+    builder = GridOptionsBuilder.from_dataframe(frame)
+    builder.configure_default_column(sortable=True, filter=True, resizable=True, suppressHeaderMenuButton=False)
+    for hidden in ("row_id", "item_id", "field_key", "序号"):
+        builder.configure_column(hidden, hide=True)
+    builder.configure_column("详情", header_name="详情", checkboxSelection=True, width=70, minWidth=65, maxWidth=80, pinned="right", sortable=False, filter=False)
+    builder.configure_column("EEA4.0信号名", width=180, minWidth=130)
+    builder.configure_column("EEA5.1信号名", width=180, minWidth=130)
+    builder.configure_column(f"EEA4.0{field_name}", width=320, minWidth=180, tooltipField=f"EEA4.0{field_name}")
+    builder.configure_column(f"EEA5.1{field_name}", width=320, minWidth=180, tooltipField=f"EEA5.1{field_name}")
+    builder.configure_column("AI判断结果", width=125, minWidth=105)
+    builder.configure_column(
+        "人工确认", width=180, minWidth=155, pinned="right", editable=can_edit,
+        cellEditor="agSelectCellEditor",
+        cellEditorParams={"values": [PENDING_REVIEW_LABEL, result_display(field_name, "same"), result_display(field_name, "different")]},
+        cellStyle={"backgroundColor": "#fff7ed"} if can_edit else {},
+    )
+    builder.configure_selection(selection_mode="single", use_checkbox=False)
+    builder.configure_pagination(paginationAutoPageSize=False, paginationPageSize=page_size)
+    builder.configure_grid_options(
+        getRowId=JsCode("function(params) { return params.data.row_id; }"),
+        suppressRowClickSelection=True,
+        rowSelection="single",
+        animateRows=False,
+        tooltipShowDelay=300,
+    )
+    return builder.build()
 
 
 def _render_detail(item: dict[str, Any], field_key: str, review: dict[str, Any], display_text: Callable[[Any], str]) -> None:
@@ -133,6 +176,11 @@ def _render_detail(item: dict[str, Any], field_key: str, review: dict[str, Any],
         st.info(item.get("signal_ai_reason") or "无AI理由")
         field_review = review.get("field_reviews", {}).get(field_key, {})
         st.write(f"当前人工确认：{result_display(field_name, field_review.get('result'))}")
+        if field_review.get("decision_source") == "history_manual":
+            st.caption(
+                f"该结论复用自历史人工审核｜来源任务：{field_review.get('history_task_id') or '-'}"
+                f"｜历史确认时间：{beijing_time(field_review.get('history_confirmed_at'))}"
+            )
 
 
 def _render_field_table(field_name: str, task_id: str, items: list[dict[str, Any]], state: dict[str, Any], can_edit: bool, drafts_key: str, dirty_key: str, detail_key: str, version_key: str) -> None:
@@ -143,7 +191,11 @@ def _render_field_table(field_name: str, task_id: str, items: list[dict[str, Any
         st.info(f"本任务没有{field_name}差异。")
         return
 
-    c1, c2, c3, p1, p2, p3, _spacer = st.columns([1.3, .7, .42, .16, .18, .16, 1.2], gap="small")
+    if AgGrid is None:
+        st.error("审核表格组件未安装，请执行 pip install -r requirements.txt 后重新启动 Streamlit。")
+        return
+
+    c1, c2, c3 = st.columns([1.7, .8, .5], gap="small")
     search = c1.text_input("搜索信号名", key=f"field-search-{field_name}-{task_id}")
     status = c2.selectbox("确认状态", ["待确认", "查看全部", "已确认"], key=f"field-status-{field_name}-{task_id}")
     page_size = int(c3.number_input("每页条数", 1, 500, 20, key=f"field-size-{field_name}-{task_id}"))
@@ -154,48 +206,39 @@ def _render_field_table(field_name: str, task_id: str, items: list[dict[str, Any
     elif status == "已确认":
         filtered = [row for row in filtered if row["人工确认"] != PENDING_REVIEW_LABEL]
 
-    pages = max(1, math.ceil(len(filtered) / page_size))
-    page_key = f"field-page-{field_name}-{task_id}"
-    page = max(1, min(int(st.session_state.get(page_key, 1)), pages))
-    st.session_state[page_key] = page
-    p1.markdown("<div style='height:28px'>页码</div>", unsafe_allow_html=True)
-    if p1.button("◀", disabled=page == 1, key=f"prev-{field_name}-{task_id}"):
-        st.session_state[page_key] = page - 1
-        st.rerun()
-    p2.markdown(f"<div style='height:28px'></div><div style='text-align:center;padding-top:8px;white-space:nowrap'>{page}/{pages}</div>", unsafe_allow_html=True)
-    p3.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-    if p3.button("▶", disabled=page == pages, key=f"next-{field_name}-{task_id}"):
-        st.session_state[page_key] = page + 1
-        st.rerun()
-    start = (page - 1) * page_size
-    page_rows = filtered[start:start + page_size]
-    selected = str(st.session_state.get(detail_key) or "")
-    for row in page_rows:
-        row["详情"] = row["row_id"] == selected
-    frame = pd.DataFrame(page_rows)
-    editor_key = field_editor_key(field_name, task_id, page)
-    st.data_editor(
-        frame, hide_index=True, width="stretch", height=min(720, 38 * (len(page_rows) + 1) + 8),
-        disabled=["row_id", "item_id", "field_key", "序号", "EEA4.0信号名", "EEA5.1信号名", f"EEA4.0{field_name}", f"EEA5.1{field_name}", "AI判断结果", *([] if can_edit else ["人工确认"])],
-        column_config={
-            "row_id": None, "item_id": None, "field_key": None, "序号": None,
-            "EEA4.0信号名": st.column_config.TextColumn("EEA4.0信号名", width=170),
-            "EEA5.1信号名": st.column_config.TextColumn("EEA5.1信号名", width=170),
-            f"EEA4.0{field_name}": st.column_config.TextColumn(f"EEA4.0{field_name}", width=300),
-            f"EEA5.1{field_name}": st.column_config.TextColumn(f"EEA5.1{field_name}", width=300),
-            "AI判断结果": st.column_config.TextColumn("AI判断结果", width=115),
-            "人工确认": st.column_config.SelectboxColumn("人工确认", options=[PENDING_REVIEW_LABEL, result_display(field_name, "same"), result_display(field_name, "different")], required=True, width=160),
-            "详情": st.column_config.CheckboxColumn("详情", width=55),
-        },
-        key=editor_key, on_change=_capture_editor_changes,
-        args=(editor_key, page_rows, state_items, drafts_key, dirty_key, detail_key, version_key),
+    grid_rows = [{**row, "详情": ""} for row in filtered]
+    frame = pd.DataFrame(grid_rows)
+    response = AgGrid(
+        frame,
+        gridOptions=_grid_options(frame, field_name, can_edit, page_size),
+        data_return_mode=DataReturnMode.FILTERED_AND_SORTED,
+        update_on=["cellValueChanged", "selectionChanged"],
+        allow_unsafe_jscode=True,
+        fit_columns_on_grid_load=False,
+        reload_data=False,
+        height=min(720, 42 * (min(len(filtered), page_size) + 2) + 48),
+        theme="streamlit",
+        key=aggrid_key(field_name, task_id),
     )
-    st.caption(f"共{len(filtered)}条｜第{page}/{pages}页")
+    returned = response.get("data") if hasattr(response, "get") else None
+    returned_rows = returned.to_dict("records") if isinstance(returned, pd.DataFrame) else (returned or [])
+    dirty = set(st.session_state.setdefault(dirty_key, []))
+    st.session_state[dirty_key] = sorted(capture_grid_changes(returned_rows, grid_rows, state_items, drafts, dirty))
+    chosen = selected_grid_row_id(response.get("selected_rows") if hasattr(response, "get") else None)
+    if chosen:
+        st.session_state[detail_key] = chosen
+    st.caption(f"共{len(filtered)}条｜表头可排序和筛选｜点击最右侧详情复选框查看单条详情")
 
 
 def render_compact_review(task_dir, review_dir, task_id: str, items: list[dict[str, Any]], state: dict[str, Any], *, can_edit: bool, session_id: str, display_text: Callable[[Any], str]) -> tuple[dict[str, Any], int]:
     stats = compute_review_stats(items, state)
-    st.caption(f"任务：{task_id}　人工已确认：{stats['manual_confirmed']}　待确认：{stats['pending_manual']}　最后保存：{beijing_time(stats['updated_at'])}")
+    st.caption(
+        f"任务：{task_id}　人工已确认：{stats['manual_confirmed']}　"
+        f"历史复用：{stats['history_reused']}　待确认：{stats['pending_manual']}　"
+        f"最后保存：{beijing_time(stats['updated_at'])}"
+    )
+    if stats["history_reused"]:
+        st.success(f"已按信号名、差异字段及4.0/5.1字段值精确复用 {stats['history_reused']} 条历史人工结论；可在“查看全部”中检查或修改。")
 
     drafts_key, dirty_key, detail_key, version_key, _drafts = initialize_review_session(st.session_state, task_id)
     state_items = state.get("items", {})
@@ -226,7 +269,12 @@ def render_compact_review(task_dir, review_dir, task_id: str, items: list[dict[s
         try:
             state = save_dirty_reviews(review_dir, task_id, st.session_state[drafts_key], dirty, base_revision=int(state.get("revision") or 0), session_id=session_id)
             st.session_state[dirty_key] = []
-            update_task_meta(task_dir, status="reviewing")
+            saved_stats = compute_review_stats(items, state)
+            update_task_meta(
+                task_dir, status="reviewing",
+                history_reused_count=int(saved_stats.get("history_reused") or 0),
+                pending_manual_count=int(saved_stats.get("pending_manual") or 0),
+            )
             st.success("人工确认结果已保存。")
             st.rerun()
         except (ReviewConflictError, ReviewLockError) as exc:

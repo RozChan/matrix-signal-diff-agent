@@ -24,6 +24,7 @@ MANUAL_TEXT_FIELDS = {"信号值描述", "单位"}
 SIGNAL_AI_JUDGEMENTS = ["真实差异", "疑似可忽略", "无法判断", "未启用"]
 SYSTEM_DEFAULT_SOURCE = "system_default"
 MANUAL_SOURCE = "manual"
+HISTORY_MANUAL_SOURCE = "history_manual"
 
 ITEM_HEADER_MAP = {
     "来源Sheet": "source_sheet",
@@ -404,7 +405,57 @@ def init_review_state(review_dir: Path, task_id: str, items: list[dict[str, Any]
                 changed = True
     if changed:
         save_review_state(review_path, state)
-    return state
+    return apply_review_history(review_path, task_id, item_list, load_review_state(review_path))
+
+
+def apply_review_history(review_dir: Path, task_id: str, items: list[dict[str, Any]], state: dict[str, Any]) -> dict[str, Any]:
+    """Fill still-pending description/unit fields from exact cross-task history."""
+
+    from .review_history import history_database_path, lookup_history_decision
+
+    reused: list[dict[str, str]] = []
+    state_items = state.setdefault("items", {})
+    db_path = history_database_path(review_dir)
+    for item in items:
+        if not is_manual_text_review_item(item):
+            continue
+        item_id = str(item.get("item_id") or "")
+        item_review = state_items.get(item_id, {})
+        reviews = item_review.get("field_reviews", {})
+        for diff in iter_item_fields(item):
+            field_key = str(diff.get("field_key") or "")
+            field_review = reviews.get(field_key, {})
+            if field_review.get("reviewed"):
+                continue
+            historical = lookup_history_decision(item, diff, db_path=db_path)
+            if not historical:
+                continue
+            now = utc_now_iso()
+            reviews[field_key] = {
+                **field_review,
+                "result": historical["result"],
+                "reviewed": True,
+                "decision_source": HISTORY_MANUAL_SOURCE,
+                "reviewed_at": now,
+                "updated_at": now,
+                "reviewer": historical.get("latest_reviewer", ""),
+                "history_fingerprint": historical["fingerprint"],
+                "history_task_id": historical.get("latest_task_id", ""),
+                "history_confirmed_at": historical.get("latest_confirmed_at", ""),
+            }
+            reused.append({"item_id": item_id, "field_key": field_key, "result": historical["result"]})
+        item_review["field_reviews"] = reviews
+        state_items[item_id] = item_review
+    if not reused:
+        return state
+    state["history_reused_count"] = int(state.get("history_reused_count") or 0) + len(reused)
+    save_review_state(review_dir, state, increment_revision=True)
+    for entry in reused:
+        try:
+            append_review_log(review_dir, {"task_id": task_id, "action": "apply_review_history", **entry})
+        except OSError:
+            pass
+    return load_review_state(review_dir)
 
 
 def load_review_state(review_dir: Path) -> dict[str, Any]:
@@ -544,7 +595,7 @@ def begin_final_generation(task_dir: Path, session_id: str) -> dict[str, Any]:
 
 def review_badge(item: dict[str, Any], review: dict[str, Any]) -> str:
     fields = review.get("field_reviews", {})
-    if any(value.get("decision_source") == MANUAL_SOURCE for value in fields.values()):
+    if any(value.get("decision_source") in {MANUAL_SOURCE, HISTORY_MANUAL_SOURCE} for value in fields.values()):
         return "人工已确认"
     if all(value.get("reviewed") for value in fields.values()):
         return "系统判定"
@@ -564,7 +615,7 @@ def compute_review_stats(items: list[dict[str, Any]], state: dict[str, Any]) -> 
     stats: dict[str, int | float | str] = {
         "signal_total": len(items), "field_total": total_fields, "pending_manual": 0,
         "manual_same": 0, "manual_different": 0, "system_different": 0,
-        "manual_confirmed": 0, "description_only_signals": 0, "unit_only_signals": 0,
+        "manual_confirmed": 0, "history_reused": 0, "description_only_signals": 0, "unit_only_signals": 0,
         "description_and_unit_signals": 0, "numeric_difference_signals": 0,
         "updated_at": state.get("updated_at", "") if isinstance(state, dict) else "",
     }
@@ -582,7 +633,9 @@ def compute_review_stats(items: list[dict[str, Any]], state: dict[str, Any]) -> 
                 stats["pending_manual"] += 1
             elif source == SYSTEM_DEFAULT_SOURCE and result == "different":
                 stats["system_different"] += 1
-            elif source == MANUAL_SOURCE:
+            elif source in {MANUAL_SOURCE, HISTORY_MANUAL_SOURCE}:
                 stats["manual_confirmed"] += 1
                 stats["manual_same" if result == "same" else "manual_different"] += 1
+                if source == HISTORY_MANUAL_SOURCE:
+                    stats["history_reused"] += 1
     return stats
