@@ -35,7 +35,7 @@ def aggrid_key(field_name: str, task_id: str) -> str:
 
     # Increment the suffix only when the grid schema changes. This resets stale
     # browser-side column widths once while remaining stable across normal edits.
-    return f"review-aggrid-v2-{field_name}-{task_id}"
+    return f"review-aggrid-v3-{field_name}-{task_id}"
 
 
 def review_phase(items: list[dict[str, Any]], state_items: dict[str, Any]) -> tuple[str, int, int]:
@@ -154,25 +154,6 @@ def _grid_options(frame: pd.DataFrame, field_name: str, can_edit: bool) -> dict[
     for hidden in ("row_id", "item_id", "field_key", "序号"):
         builder.configure_column(hidden, hide=True)
     layout = grid_column_layout(field_name)
-    full_text_renderer = JsCode(
-        """
-        function(params) {
-            const value = params.value == null ? '' : String(params.value);
-            const node = document.createElement('span');
-            node.textContent = value;
-            node.title = '双击查看完整内容';
-            node.style.display = 'block';
-            node.style.overflow = 'hidden';
-            node.style.textOverflow = 'ellipsis';
-            node.style.whiteSpace = 'nowrap';
-            node.addEventListener('dblclick', function(event) {
-                event.stopPropagation();
-                window.alert(value || '<空>');
-            });
-            return node;
-        }
-        """
-    )
     builder.configure_column(
         "详情", header_name="详情", checkboxSelection=True, pinned="right",
         sortable=False, filter=False, **layout["详情"],
@@ -181,7 +162,7 @@ def _grid_options(frame: pd.DataFrame, field_name: str, can_edit: bool) -> dict[
     builder.configure_column("EEA5.1信号名", **layout["EEA5.1信号名"])
     for value_column in (f"EEA4.0{field_name}", f"EEA5.1{field_name}"):
         builder.configure_column(
-            value_column, tooltipField=value_column, cellRenderer=full_text_renderer,
+            value_column, tooltipField=value_column,
             **layout[value_column],
         )
     builder.configure_column("AI判断结果", **layout["AI判断结果"])
@@ -209,6 +190,17 @@ def _grid_options(frame: pd.DataFrame, field_name: str, can_edit: bool) -> dict[
                     params.api.startEditingCell({rowIndex: params.rowIndex, colKey: '人工确认'});
                 }
             }
+            """
+        ),
+        onCellDoubleClicked=JsCode(
+            f"""
+            function(params) {{
+                const fullTextColumns = ['EEA4.0{field_name}', 'EEA5.1{field_name}'];
+                if (fullTextColumns.includes(params.colDef.field)) {{
+                    const value = params.value == null || params.value === '' ? '<空>' : String(params.value);
+                    window.alert(value);
+                }}
+            }}
             """
         ),
         animateRows=False,
