@@ -560,13 +560,13 @@ output/人工审核后最终差异结果.xlsx
 start_demo.bat
 ```
 
-默认访问：
+默认会使用 `.streamlit/config.toml` 中配置的内网地址，并自动进入管理员页面：
 
 ```text
-http://localhost:8501
+http://10.105.194.180:8501/?view=admin
 ```
 
-适用于不接飞书时的本地上传、人工审核、历史任务恢复和结果下载。
+直接运行 `python -m streamlit run app.py`、`start_demo.bat` 或 `start_server.bat` 时均不会再自动打开 localhost。飞书审核链接和结果链接仍按各自 query 参数进入对应页面。
 
 #### 2. 内网审核服务模式
 
@@ -586,7 +586,7 @@ streamlit run app.py --server.address 0.0.0.0 --server.port 8501
 REVIEW_BASE_URL=http://工作站内网IP:8501
 ```
 
-代码不会写死 localhost 或内网 IP。
+审核和结果通知地址仍由 `REVIEW_BASE_URL` 控制；本机启动时自动打开的管理员地址由 `.streamlit/config.toml` 控制。
 
 #### 3. 飞书机器人模式
 
@@ -889,3 +889,9 @@ python tools/test_confluence_connection.py --test-url "https://yfconfluence.mych
 5. display URL、短链接 `/x/...` 的解析；
 6. 飞书消息里 Confluence URL 的实际文本格式；
 7. 文件下载完成后自动启动 worker 和最终回传是否符合预期。
+
+### 人工审核表格与历史结论
+
+人工审核表格使用 `streamlit-aggrid`，以稳定的 `row_id` 关联现有审核后端。表头排序、筛选、原生分页、单行详情选择和人工确认编辑均由 AG Grid 处理；4.0/5.1字段值列会平分剩余宽度，完整内容统一通过最右侧详情查看。保存时仍执行现有审核锁和 revision 校验。
+
+用户点击“保存所有未保存修改”后，信号值描述/单位的人工结论还会写入跨任务 SQLite 历史库。新任务生成审核状态时，仅在来源、4.0/5.1 信号名、差异字段及两侧字段值均精确匹配时复用历史结论；描述与单位分别匹配，含数值或未解析差异的信号不会进入该复用流程。默认数据库位于 `TASK_ROOT_DIR/review_history.sqlite3`，可通过 `REVIEW_HISTORY_DB` 指定其他持久化路径。
