@@ -50,6 +50,7 @@ APP_ROOT = Path(__file__).resolve().parent
 TEMP_ROOT = Path(os.getenv("TASK_ROOT_DIR", str(APP_ROOT / "temp"))).expanduser().resolve()
 ALLOWED_EXTENSIONS = {".xlsx", ".xlsm"}
 REVIEW_LOCK_READY_STATUSES = {"awaiting_review", "reviewing"}
+APP_TITLE = "EEA4.0 & EEA5.1信号对比人工确认"
 
 
 def _display_text(value: object) -> str:
@@ -659,7 +660,7 @@ def _show_admin_page() -> None:
 
 
 def main() -> None:
-    st.set_page_config(page_title="EEA 4.0/5.1 矩阵同一信号差异识别工具", layout="wide")
+    st.set_page_config(page_title=APP_TITLE, layout="wide")
     view = str(st.query_params.get("view", ""))
     if not view and not st.query_params.get("task_id") and not st.query_params.get("token"):
         st.query_params["view"] = "admin"
@@ -674,7 +675,7 @@ def main() -> None:
     query_token = st.query_params.get("token", "")
     feishu_link_mode = bool(query_task_id or query_token)
     if feishu_link_mode:
-        st.title("EEA 4.0/5.1 矩阵同一信号差异识别工具")
+        st.title(APP_TITLE)
         task_dir = _task_dir(str(query_task_id))
         meta = load_task_meta(task_dir)
         if not meta or not query_token or meta.get("review_token") != query_token:
@@ -682,7 +683,7 @@ def main() -> None:
             return
         st.session_state["current_task_id"] = str(query_task_id)
     else:
-        st.title("EEA 4.0/5.1 矩阵同一信号差异识别工具")
+        st.title(APP_TITLE)
         st.caption("本地 Streamlit Demo：封装 legacy 脚本流程；AI 复核仅作为人工审核参考，最终以人工审核结果为准。")
     _show_history_loader(hide_history=feishu_link_mode)
     if not feishu_link_mode:

@@ -30,12 +30,13 @@ def initialize_review_session(session_state: Any, task_id: str) -> tuple[str, st
     return drafts_key, dirty_key, detail_key, version_key, drafts
 
 
-def aggrid_key(field_name: str, task_id: str) -> str:
-    """Use one stable grid identity so AG Grid retains sorting across edits."""
+def aggrid_key(field_name: str, task_id: str, can_edit: bool = True) -> str:
+    """Keep stable but separate grid identities for editor and read-only views."""
 
     # Increment the suffix only when the grid schema changes. This resets stale
     # browser-side column widths once while remaining stable across normal edits.
-    return f"review-aggrid-v4-{field_name}-{task_id}"
+    mode = "edit" if can_edit else "view"
+    return f"review-aggrid-v5-{mode}-{field_name}-{task_id}"
 
 
 def review_phase(items: list[dict[str, Any]], state_items: dict[str, Any]) -> tuple[str, int, int]:
@@ -231,11 +232,11 @@ def _render_field_table(field_name: str, task_id: str, items: list[dict[str, Any
         data_return_mode=DataReturnMode.FILTERED_AND_SORTED,
         update_on=["cellValueChanged", "selectionChanged"],
         allow_unsafe_jscode=True,
-        fit_columns_on_grid_load=False,
+        fit_columns_on_grid_load=True,
         reload_data=False,
         height=min(720, 42 * (min(len(rows), 20) + 2) + 48),
         theme="streamlit",
-        key=aggrid_key(field_name, task_id),
+        key=aggrid_key(field_name, task_id, can_edit),
     )
     returned = response.get("data") if hasattr(response, "get") else None
     returned_rows = returned.to_dict("records") if isinstance(returned, pd.DataFrame) else (returned or [])

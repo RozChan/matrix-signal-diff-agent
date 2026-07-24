@@ -10,6 +10,10 @@ import app
 from core.review_store import acquire_review_lock, begin_final_generation, create_task_meta, init_review_state, load_task_meta, update_task_meta
 
 
+def test_application_title_matches_review_workflow() -> None:
+    assert app.APP_TITLE == "EEA4.0 & EEA5.1信号对比人工确认"
+
+
 class FakeColumn:
     def metric(self, *args, **kwargs):
         return None

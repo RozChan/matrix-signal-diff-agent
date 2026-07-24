@@ -129,7 +129,8 @@ def test_binary_editor_drafts_only_mark_changed_fields() -> None:
 
 
 def test_aggrid_key_is_stable_across_review_edits() -> None:
-    assert aggrid_key("信号值描述", "task") == aggrid_key("信号值描述", "task")
+    assert aggrid_key("信号值描述", "task", True) == aggrid_key("信号值描述", "task", True)
+    assert aggrid_key("信号值描述", "task", True) != aggrid_key("信号值描述", "task", False)
 
 
 def test_aggrid_column_layout_bounds_long_values_and_keeps_actions_compact() -> None:
