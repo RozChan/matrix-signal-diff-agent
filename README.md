@@ -892,6 +892,6 @@ python tools/test_confluence_connection.py --test-url "https://yfconfluence.mych
 
 ### 人工审核表格与历史结论
 
-人工审核表格使用 `streamlit-aggrid`，以稳定的 `row_id` 关联现有审核后端。表头排序、筛选、单行详情选择和人工确认编辑均由 AG Grid 处理；保存时仍执行现有审核锁和 revision 校验。
+人工审核表格使用 `streamlit-aggrid`，以稳定的 `row_id` 关联现有审核后端。表头排序、筛选、原生分页、单行详情选择和人工确认编辑均由 AG Grid 处理；字段值列使用限定宽度，悬停可看提示，双击可弹出完整内容。保存时仍执行现有审核锁和 revision 校验。
 
 用户点击“保存所有未保存修改”后，信号值描述/单位的人工结论还会写入跨任务 SQLite 历史库。新任务生成审核状态时，仅在来源、4.0/5.1 信号名、差异字段及两侧字段值均精确匹配时复用历史结论；描述与单位分别匹配，含数值或未解析差异的信号不会进入该复用流程。默认数据库位于 `TASK_ROOT_DIR/review_history.sqlite3`，可通过 `REVIEW_HISTORY_DB` 指定其他持久化路径。

@@ -33,7 +33,9 @@ def initialize_review_session(session_state: Any, task_id: str) -> tuple[str, st
 def aggrid_key(field_name: str, task_id: str) -> str:
     """Use one stable grid identity so AG Grid retains sorting across edits."""
 
-    return f"review-aggrid-{field_name}-{task_id}"
+    # Increment the suffix only when the grid schema changes. This resets stale
+    # browser-side column widths once while remaining stable across normal edits.
+    return f"review-aggrid-v2-{field_name}-{task_id}"
 
 
 def review_phase(items: list[dict[str, Any]], state_items: dict[str, Any]) -> tuple[str, int, int]:
@@ -132,29 +134,83 @@ def selected_grid_row_id(selected_rows: Any) -> str:
     return str(records[0].get("row_id") or "") if records else ""
 
 
-def _grid_options(frame: pd.DataFrame, field_name: str, can_edit: bool, page_size: int) -> dict[str, Any]:
+def grid_column_layout(field_name: str) -> dict[str, dict[str, Any]]:
+    """Return bounded responsive widths so every business column fits onscreen."""
+
+    return {
+        "详情": {"width": 58, "minWidth": 55, "maxWidth": 64},
+        "EEA4.0信号名": {"flex": 0.75, "minWidth": 120, "maxWidth": 175},
+        "EEA5.1信号名": {"flex": 0.75, "minWidth": 120, "maxWidth": 175},
+        f"EEA4.0{field_name}": {"flex": 1.35, "minWidth": 180, "maxWidth": 285},
+        f"EEA5.1{field_name}": {"flex": 1.35, "minWidth": 180, "maxWidth": 285},
+        "AI判断结果": {"flex": 0.55, "minWidth": 100, "maxWidth": 125},
+        "人工确认": {"width": 165, "minWidth": 155, "maxWidth": 180},
+    }
+
+
+def _grid_options(frame: pd.DataFrame, field_name: str, can_edit: bool) -> dict[str, Any]:
     builder = GridOptionsBuilder.from_dataframe(frame)
     builder.configure_default_column(sortable=True, filter=True, resizable=True, suppressHeaderMenuButton=False)
     for hidden in ("row_id", "item_id", "field_key", "序号"):
         builder.configure_column(hidden, hide=True)
-    builder.configure_column("详情", header_name="详情", checkboxSelection=True, width=70, minWidth=65, maxWidth=80, pinned="right", sortable=False, filter=False)
-    builder.configure_column("EEA4.0信号名", width=180, minWidth=130)
-    builder.configure_column("EEA5.1信号名", width=180, minWidth=130)
-    builder.configure_column(f"EEA4.0{field_name}", width=320, minWidth=180, tooltipField=f"EEA4.0{field_name}")
-    builder.configure_column(f"EEA5.1{field_name}", width=320, minWidth=180, tooltipField=f"EEA5.1{field_name}")
-    builder.configure_column("AI判断结果", width=125, minWidth=105)
+    layout = grid_column_layout(field_name)
+    full_text_renderer = JsCode(
+        """
+        function(params) {
+            const value = params.value == null ? '' : String(params.value);
+            const node = document.createElement('span');
+            node.textContent = value;
+            node.title = '双击查看完整内容';
+            node.style.display = 'block';
+            node.style.overflow = 'hidden';
+            node.style.textOverflow = 'ellipsis';
+            node.style.whiteSpace = 'nowrap';
+            node.addEventListener('dblclick', function(event) {
+                event.stopPropagation();
+                window.alert(value || '<空>');
+            });
+            return node;
+        }
+        """
+    )
     builder.configure_column(
-        "人工确认", width=180, minWidth=155, pinned="right", editable=can_edit,
+        "详情", header_name="详情", checkboxSelection=True, pinned="right",
+        sortable=False, filter=False, **layout["详情"],
+    )
+    builder.configure_column("EEA4.0信号名", **layout["EEA4.0信号名"])
+    builder.configure_column("EEA5.1信号名", **layout["EEA5.1信号名"])
+    for value_column in (f"EEA4.0{field_name}", f"EEA5.1{field_name}"):
+        builder.configure_column(
+            value_column, tooltipField=value_column, cellRenderer=full_text_renderer,
+            **layout[value_column],
+        )
+    builder.configure_column("AI判断结果", **layout["AI判断结果"])
+    builder.configure_column(
+        "人工确认", pinned="right", editable=bool(can_edit), singleClickEdit=True,
         cellEditor="agSelectCellEditor",
         cellEditorParams={"values": [PENDING_REVIEW_LABEL, result_display(field_name, "same"), result_display(field_name, "different")]},
         cellStyle={"backgroundColor": "#fff7ed"} if can_edit else {},
+        **layout["人工确认"],
     )
     builder.configure_selection(selection_mode="single", use_checkbox=False)
-    builder.configure_pagination(paginationAutoPageSize=False, paginationPageSize=page_size)
+    builder.configure_pagination(paginationAutoPageSize=False, paginationPageSize=20)
     builder.configure_grid_options(
         getRowId=JsCode("function(params) { return params.data.row_id; }"),
         suppressRowClickSelection=True,
         rowSelection="single",
+        singleClickEdit=True,
+        suppressClickEdit=False,
+        stopEditingWhenCellsLoseFocus=True,
+        paginationPageSizeSelector=[10, 20, 50, 100],
+        onCellClicked=JsCode(
+            """
+            function(params) {
+                if (params.colDef.field === '人工确认' && params.colDef.editable) {
+                    params.api.startEditingCell({rowIndex: params.rowIndex, colKey: '人工确认'});
+                }
+            }
+            """
+        ),
         animateRows=False,
         tooltipShowDelay=300,
     )
@@ -195,10 +251,9 @@ def _render_field_table(field_name: str, task_id: str, items: list[dict[str, Any
         st.error("审核表格组件未安装，请执行 pip install -r requirements.txt 后重新启动 Streamlit。")
         return
 
-    c1, c2, c3 = st.columns([1.7, .8, .5], gap="small")
+    c1, c2 = st.columns([1.7, .8], gap="small")
     search = c1.text_input("搜索信号名", key=f"field-search-{field_name}-{task_id}")
     status = c2.selectbox("确认状态", ["待确认", "查看全部", "已确认"], key=f"field-status-{field_name}-{task_id}")
-    page_size = int(c3.number_input("每页条数", 1, 500, 20, key=f"field-size-{field_name}-{task_id}"))
     needle = search.strip().casefold()
     filtered = [row for row in rows if (not needle or needle in row["EEA4.0信号名"].casefold() or needle in row["EEA5.1信号名"].casefold())]
     if status == "待确认":
@@ -210,13 +265,13 @@ def _render_field_table(field_name: str, task_id: str, items: list[dict[str, Any
     frame = pd.DataFrame(grid_rows)
     response = AgGrid(
         frame,
-        gridOptions=_grid_options(frame, field_name, can_edit, page_size),
+        gridOptions=_grid_options(frame, field_name, can_edit),
         data_return_mode=DataReturnMode.FILTERED_AND_SORTED,
         update_on=["cellValueChanged", "selectionChanged"],
         allow_unsafe_jscode=True,
         fit_columns_on_grid_load=False,
         reload_data=False,
-        height=min(720, 42 * (min(len(filtered), page_size) + 2) + 48),
+        height=min(720, 42 * (min(len(filtered), 20) + 2) + 48),
         theme="streamlit",
         key=aggrid_key(field_name, task_id),
     )
@@ -227,7 +282,7 @@ def _render_field_table(field_name: str, task_id: str, items: list[dict[str, Any
     chosen = selected_grid_row_id(response.get("selected_rows") if hasattr(response, "get") else None)
     if chosen:
         st.session_state[detail_key] = chosen
-    st.caption(f"共{len(filtered)}条｜表头可排序和筛选｜点击最右侧详情复选框查看单条详情")
+    st.caption(f"共{len(filtered)}条｜表头可排序和筛选｜描述内容可悬停查看，双击弹出完整内容｜点击最右侧详情复选框查看单条详情")
 
 
 def render_compact_review(task_dir, review_dir, task_id: str, items: list[dict[str, Any]], state: dict[str, Any], *, can_edit: bool, session_id: str, display_text: Callable[[Any], str]) -> tuple[dict[str, Any], int]:

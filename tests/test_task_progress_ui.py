@@ -11,7 +11,7 @@ from core.confluence_task_store import add_sources, update_source
 from core.review_store import acquire_review_lock, compute_review_stats, create_task_meta, init_review_state, update_task_meta
 from core.review_table import PENDING_REVIEW_LABEL, apply_editor_changes, field_rows, pending_review_count, result_display, save_dirty_reviews
 from core.task_progress import ACTIVE_STATUSES, allowed_admin_actions, beijing_time, build_task_progress, choose_default_task, overall_percent
-from ui.review_table import aggrid_key, capture_grid_changes, chinese_review_stats, initialize_review_session, review_phase, selected_grid_row_id, system_difference_rows
+from ui.review_table import aggrid_key, capture_grid_changes, chinese_review_stats, grid_column_layout, initialize_review_session, review_phase, selected_grid_row_id, system_difference_rows
 
 
 def make_task(tmp_path: Path, task_id: str = "task1") -> Path:
@@ -128,6 +128,15 @@ def test_binary_editor_drafts_only_mark_changed_fields() -> None:
 
 def test_aggrid_key_is_stable_across_review_edits() -> None:
     assert aggrid_key("信号值描述", "task") == aggrid_key("信号值描述", "task")
+
+
+def test_aggrid_column_layout_bounds_long_values_and_keeps_actions_compact() -> None:
+    layout = grid_column_layout("信号值描述")
+    assert layout["EEA4.0信号值描述"]["maxWidth"] == 285
+    assert layout["EEA5.1信号值描述"]["maxWidth"] == 285
+    assert layout["EEA4.0信号名"]["maxWidth"] == 175
+    assert layout["人工确认"]["maxWidth"] == 180
+    assert layout["详情"]["maxWidth"] == 64
 
 
 def test_aggrid_changes_follow_row_id_after_frontend_sorting() -> None:
