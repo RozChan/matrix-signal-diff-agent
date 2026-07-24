@@ -93,7 +93,9 @@ def test_numeric_signals_are_excluded_from_manual_tables_and_listed_as_system_di
     assert pending_review_count(state) == 1
     [system_row] = system_difference_rows(items)
     assert system_row["EEA4.0信号名"] == "A-mixed"
-    assert system_row["数值差异字段"] == "信号长度"
+    assert system_row["差异字段"] == "信号值描述、信号长度"
+    assert "信号值描述：4.0=Key not stored；5.1=SC or SK not stored" in system_row["具体差异（4.0 / 5.1）"]
+    assert "信号长度：4.0=8；5.1=12" in system_row["具体差异（4.0 / 5.1）"]
 
 
 def test_review_phase_requires_descriptions_before_units(tmp_path: Path) -> None:

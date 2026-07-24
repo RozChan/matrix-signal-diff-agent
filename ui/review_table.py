@@ -53,20 +53,21 @@ def review_phase(items: list[dict[str, Any]], state_items: dict[str, Any]) -> tu
 
 
 def system_difference_rows(items: list[dict[str, Any]]) -> list[dict[str, str]]:
-    """Build one read-only row for every signal containing a numeric difference."""
+    """Show every field difference for signals selected by a numeric difference."""
 
     rows: list[dict[str, str]] = []
     for item in items:
-        numeric = [diff for diff in item.get("field_diffs") or [] if diff.get("field_type") == "numeric"]
+        field_diffs = list(item.get("field_diffs") or [])
+        numeric = [diff for diff in field_diffs if diff.get("field_type") == "numeric"]
         if not numeric:
             continue
         rows.append({
             "EEA4.0信号名": str(item.get("signal_40") or "<空>"),
             "EEA5.1信号名": str(item.get("signal_51") or "<空>"),
-            "数值差异字段": "、".join(str(diff.get("diff_field") or "") for diff in numeric),
+            "差异字段": "、".join(str(diff.get("diff_field") or "") for diff in field_diffs),
             "具体差异（4.0 / 5.1）": "｜".join(
                 f"{diff.get('diff_field')}：4.0={diff.get('value_40') or '<空>'}；5.1={diff.get('value_51') or '<空>'}"
-                for diff in numeric
+                for diff in field_diffs
             ),
             "判定结果": "系统判定不同",
         })
