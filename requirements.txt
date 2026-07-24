@@ -1,4 +1,5 @@
 streamlit
+streamlit-aggrid==1.1.9
 openpyxl
 pandas
 requests
