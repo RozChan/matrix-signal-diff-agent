@@ -86,6 +86,8 @@ def run_task(task_id: str, enable_ai: bool = True) -> dict[str, Any]:
             ai_required_signal_count=int(ai_stats.get("ai_called_count") or 0),
             ai_completed_signal_count=int(ai_stats.get("ai_reviewed_count") or 0),
             ai_failed_signal_count=int(ai_stats.get("ai_failed_count") or 0),
+            history_reused_count=int(review_stats.get("history_reused") or 0),
+            pending_manual_count=int(review_stats.get("pending_manual") or 0),
         )
         return {"task_id": task_id, "review_url": meta.get("review_url"), "review_stats": review_stats, "ai_stats": ai_stats}
     except Exception as exc:  # noqa: BLE001
