@@ -35,7 +35,7 @@ def aggrid_key(field_name: str, task_id: str) -> str:
 
     # Increment the suffix only when the grid schema changes. This resets stale
     # browser-side column widths once while remaining stable across normal edits.
-    return f"review-aggrid-v3-{field_name}-{task_id}"
+    return f"review-aggrid-v4-{field_name}-{task_id}"
 
 
 def review_phase(items: list[dict[str, Any]], state_items: dict[str, Any]) -> tuple[str, int, int]:
@@ -141,8 +141,8 @@ def grid_column_layout(field_name: str) -> dict[str, dict[str, Any]]:
         "详情": {"width": 58, "minWidth": 55, "maxWidth": 64},
         "EEA4.0信号名": {"flex": 0.75, "minWidth": 120, "maxWidth": 175},
         "EEA5.1信号名": {"flex": 0.75, "minWidth": 120, "maxWidth": 175},
-        f"EEA4.0{field_name}": {"flex": 1.35, "minWidth": 180, "maxWidth": 285},
-        f"EEA5.1{field_name}": {"flex": 1.35, "minWidth": 180, "maxWidth": 285},
+        f"EEA4.0{field_name}": {"flex": 1, "minWidth": 220},
+        f"EEA5.1{field_name}": {"flex": 1, "minWidth": 220},
         "AI判断结果": {"flex": 0.55, "minWidth": 100, "maxWidth": 125},
         "人工确认": {"width": 165, "minWidth": 155, "maxWidth": 180},
     }
@@ -167,7 +167,7 @@ def _grid_options(frame: pd.DataFrame, field_name: str, can_edit: bool) -> dict[
         )
     builder.configure_column("AI判断结果", **layout["AI判断结果"])
     builder.configure_column(
-        "人工确认", pinned="right", editable=bool(can_edit), singleClickEdit=True,
+        "人工确认", pinned="right", editable=bool(can_edit),
         cellEditor="agSelectCellEditor",
         cellEditorParams={"values": [PENDING_REVIEW_LABEL, result_display(field_name, "same"), result_display(field_name, "different")]},
         cellStyle={"backgroundColor": "#fff7ed"} if can_edit else {},
@@ -181,28 +181,7 @@ def _grid_options(frame: pd.DataFrame, field_name: str, can_edit: bool) -> dict[
         rowSelection="single",
         singleClickEdit=True,
         suppressClickEdit=False,
-        stopEditingWhenCellsLoseFocus=True,
         paginationPageSizeSelector=[10, 20, 50, 100],
-        onCellClicked=JsCode(
-            """
-            function(params) {
-                if (params.colDef.field === '人工确认' && params.colDef.editable) {
-                    params.api.startEditingCell({rowIndex: params.rowIndex, colKey: '人工确认'});
-                }
-            }
-            """
-        ),
-        onCellDoubleClicked=JsCode(
-            f"""
-            function(params) {{
-                const fullTextColumns = ['EEA4.0{field_name}', 'EEA5.1{field_name}'];
-                if (fullTextColumns.includes(params.colDef.field)) {{
-                    const value = params.value == null || params.value === '' ? '<空>' : String(params.value);
-                    window.alert(value);
-                }}
-            }}
-            """
-        ),
         animateRows=False,
         tooltipShowDelay=300,
     )
@@ -243,17 +222,7 @@ def _render_field_table(field_name: str, task_id: str, items: list[dict[str, Any
         st.error("审核表格组件未安装，请执行 pip install -r requirements.txt 后重新启动 Streamlit。")
         return
 
-    c1, c2 = st.columns([1.7, .8], gap="small")
-    search = c1.text_input("搜索信号名", key=f"field-search-{field_name}-{task_id}")
-    status = c2.selectbox("确认状态", ["待确认", "查看全部", "已确认"], key=f"field-status-{field_name}-{task_id}")
-    needle = search.strip().casefold()
-    filtered = [row for row in rows if (not needle or needle in row["EEA4.0信号名"].casefold() or needle in row["EEA5.1信号名"].casefold())]
-    if status == "待确认":
-        filtered = [row for row in filtered if row["人工确认"] == PENDING_REVIEW_LABEL]
-    elif status == "已确认":
-        filtered = [row for row in filtered if row["人工确认"] != PENDING_REVIEW_LABEL]
-
-    grid_rows = [{**row, "详情": ""} for row in filtered]
+    grid_rows = [{**row, "详情": ""} for row in rows]
     frame = pd.DataFrame(grid_rows)
     response = AgGrid(
         frame,
@@ -263,7 +232,7 @@ def _render_field_table(field_name: str, task_id: str, items: list[dict[str, Any
         allow_unsafe_jscode=True,
         fit_columns_on_grid_load=False,
         reload_data=False,
-        height=min(720, 42 * (min(len(filtered), 20) + 2) + 48),
+        height=min(720, 42 * (min(len(rows), 20) + 2) + 48),
         theme="streamlit",
         key=aggrid_key(field_name, task_id),
     )
@@ -274,7 +243,7 @@ def _render_field_table(field_name: str, task_id: str, items: list[dict[str, Any
     chosen = selected_grid_row_id(response.get("selected_rows") if hasattr(response, "get") else None)
     if chosen:
         st.session_state[detail_key] = chosen
-    st.caption(f"共{len(filtered)}条｜表头可排序和筛选｜描述内容可悬停查看，双击弹出完整内容｜点击最右侧详情复选框查看单条详情")
+    st.caption(f"共{len(rows)}条｜可直接使用表头排序和筛选｜点击最右侧详情复选框查看完整内容")
 
 
 def render_compact_review(task_dir, review_dir, task_id: str, items: list[dict[str, Any]], state: dict[str, Any], *, can_edit: bool, session_id: str, display_text: Callable[[Any], str]) -> tuple[dict[str, Any], int]:

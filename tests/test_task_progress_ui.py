@@ -132,8 +132,8 @@ def test_aggrid_key_is_stable_across_review_edits() -> None:
 
 def test_aggrid_column_layout_bounds_long_values_and_keeps_actions_compact() -> None:
     layout = grid_column_layout("信号值描述")
-    assert layout["EEA4.0信号值描述"]["maxWidth"] == 285
-    assert layout["EEA5.1信号值描述"]["maxWidth"] == 285
+    assert layout["EEA4.0信号值描述"] == {"flex": 1, "minWidth": 220}
+    assert layout["EEA5.1信号值描述"] == {"flex": 1, "minWidth": 220}
     assert layout["EEA4.0信号名"]["maxWidth"] == 175
     assert layout["人工确认"]["maxWidth"] == 180
     assert layout["详情"]["maxWidth"] == 64
