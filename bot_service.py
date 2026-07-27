@@ -33,7 +33,6 @@ except Exception:  # noqa: BLE001
 from core.bot_task_store import (
     atomic_write_json,
     append_bot_event,
-    bot_dir,
     clear_active_session,
     create_upload_session,
     get_active_task_id,
@@ -1002,7 +1001,7 @@ def monitor_tasks_loop(client: LarkCliClient, interval_seconds: int = 15) -> Non
         time.sleep(interval_seconds)
 
 
-def consume_events(client: LarkCliClient) -> None:
+def consume_events(client: LarkCliClient) -> int:
     log.info("开始监听飞书消息事件：<LARK_CLI> event consume im.message.receive_v1 --as bot")
     proc = client.open_event_consumer()
 
@@ -1030,6 +1029,15 @@ def consume_events(client: LarkCliClient) -> None:
             log.warning("无法解析事件：%s", line[:200])
             continue
         threading.Thread(target=handle_event, args=(event, client), daemon=True).start()
+    cli_return_code = proc.wait()
+    log.error(
+        "飞书事件监听进程意外结束（lark-cli退出码=%s）。请检查是否已有其他主机或进程连接同一企业应用事件总线。",
+        cli_return_code,
+    )
+    # event consume is expected to be a permanent process. Even if lark-cli
+    # reports a validation/precondition failure with code 0, the bot service
+    # itself must report failure instead of looking like a clean shutdown.
+    return cli_return_code or 1
 
 
 def main() -> int:
@@ -1045,8 +1053,7 @@ def main() -> int:
     get_task_root().mkdir(parents=True, exist_ok=True)
     recover_on_start(client)
     threading.Thread(target=monitor_tasks_loop, args=(client,), daemon=True).start()
-    consume_events(client)
-    return 0
+    return consume_events(client)
 
 
 if __name__ == "__main__":
