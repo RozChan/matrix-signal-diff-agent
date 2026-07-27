@@ -30,7 +30,9 @@ from core.notification_router import notify_result_ready
 from core.admin_tasks import admin_system_status, admin_token_valid, cancel_admin_task, create_admin_full_compare, list_admin_tasks, retry_admin_confluence, safe_task_dir
 from core.task_progress import allowed_admin_actions, beijing_time, build_task_progress, choose_default_task, status_label, trigger_label
 from core.review_table import pending_review_count
+from core.review_history import history_database_path
 from ui.admin_progress import render_live_task_progress
+from ui.admin_history import render_admin_history
 from ui.review_table import render_compact_review, render_review_stats, render_system_differences
 from core.review_store import (
     acquire_review_lock,
@@ -590,6 +592,7 @@ def _show_admin_page() -> None:
     status = admin_system_status()
     st.subheader("系统状态")
     st.json(status)
+    render_admin_history(history_database_path())
     st.subheader("手动创建全量任务")
     st.write(f"4.0父页面：{os.getenv('FULL_COMPARE_40_PARENT_URL', '') or '<未配置>'}")
     st.write(f"5.1父页面：{os.getenv('FULL_COMPARE_51_PARENT_URL', '') or '<未配置>'}")

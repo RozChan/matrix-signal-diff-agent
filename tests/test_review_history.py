@@ -4,12 +4,23 @@ import json
 from pathlib import Path
 import sys
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from openpyxl import load_workbook
 
 from core.final_export import export_final_review_result
-from core.review_history import history_counts, history_database_path
+from core.review_history import (
+    admin_set_history_enabled,
+    admin_update_history_decision,
+    export_history_csv,
+    history_counts,
+    history_database_path,
+    history_decision_events,
+    history_summary,
+    list_history_decisions,
+)
 from core.review_store import acquire_review_lock, compute_review_stats, create_task_meta, init_review_state
 from core.review_table import save_dirty_reviews
 
@@ -112,3 +123,63 @@ def test_manual_override_updates_history_and_keeps_audit_events(tmp_path: Path) 
     create_task_meta(second, "second")
     state = init_review_state(second / "review", "second", [_item("new")])
     assert state["items"]["new"]["field_reviews"]["信号值描述"]["result"] == "different"
+
+
+def test_admin_can_search_correct_disable_and_restore_history(tmp_path: Path) -> None:
+    first = tmp_path / "first"
+    create_task_meta(first, "first")
+    _save_task_decisions(first, "first", _item("old"), {"信号值描述": "same"})
+    db_path = history_database_path(first / "review")
+
+    summary = history_summary(db_path=db_path)
+    assert summary["decisions"] == 1
+    assert summary["enabled"] == 1
+    assert summary["descriptions"] == 1
+    rows = list_history_decisions(db_path=db_path, search="ExampleSignal", result="same", enabled=True)
+    assert len(rows) == 1
+    fingerprint = rows[0]["fingerprint"]
+
+    updated = admin_update_history_decision(
+        db_path=db_path, fingerprint=fingerprint, result="different",
+        actor="admin_web", reason="业务规则纠正",
+    )
+    assert updated["result"] == "different"
+    assert history_decision_events(db_path=db_path, fingerprint=fingerprint)[0]["action"] == "admin_correct"
+
+    admin_set_history_enabled(
+        db_path=db_path, fingerprint=fingerprint, enabled=False,
+        actor="admin_web", reason="等待复核",
+    )
+    assert history_summary(db_path=db_path)["disabled"] == 1
+    second = tmp_path / "second"
+    create_task_meta(second, "second")
+    state = init_review_state(second / "review", "second", [_item("new")])
+    assert state["items"]["new"]["field_reviews"]["信号值描述"]["reviewed"] is False
+
+    admin_set_history_enabled(
+        db_path=db_path, fingerprint=fingerprint, enabled=True,
+        actor="admin_web", reason="复核通过",
+    )
+    third = tmp_path / "third"
+    create_task_meta(third, "third")
+    state = init_review_state(third / "review", "third", [_item("newer")])
+    assert state["items"]["newer"]["field_reviews"]["信号值描述"]["result"] == "different"
+
+
+def test_admin_history_requires_reason_and_exports_audit(tmp_path: Path) -> None:
+    first = tmp_path / "first"
+    create_task_meta(first, "first")
+    _save_task_decisions(first, "first", _item("old"), {"信号值描述": "same"})
+    db_path = history_database_path(first / "review")
+    fingerprint = list_history_decisions(db_path=db_path)[0]["fingerprint"]
+
+    with pytest.raises(ValueError, match="必须填写原因"):
+        admin_update_history_decision(
+            db_path=db_path, fingerprint=fingerprint, result="different", actor="admin_web", reason="",
+        )
+    with pytest.raises(ValueError, match="必须填写原因"):
+        admin_set_history_enabled(
+            db_path=db_path, fingerprint=fingerprint, enabled=False, actor="admin_web", reason="",
+        )
+    assert "ExampleSignal" in export_history_csv(db_path=db_path).decode("utf-8-sig")
+    assert "confirmed_at" in export_history_csv(db_path=db_path, events=True).decode("utf-8-sig")
