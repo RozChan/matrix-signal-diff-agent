@@ -37,10 +37,9 @@ if errorlevel 1 (
     goto fail
 )
 
-echo 正在启动 Streamlit，请稍候...
-echo 浏览器将打开：http://10.105.194.180:8501/?view=admin
-echo python -m streamlit run app.py >> "%LOG_FILE%"
-python -m streamlit run app.py
+echo 正在根据 .env 中的 REVIEW_BASE_URL 启动 Streamlit，请稍候...
+echo python tools\run_streamlit.py >> "%LOG_FILE%"
+python tools\run_streamlit.py
 set "EXIT_CODE=%ERRORLEVEL%"
 echo Streamlit exited with code %EXIT_CODE% >> "%LOG_FILE%"
 if not "%EXIT_CODE%"=="0" (

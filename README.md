@@ -560,13 +560,14 @@ output/人工审核后最终差异结果.xlsx
 start_demo.bat
 ```
 
-默认会使用 `.streamlit/config.toml` 中配置的内网地址，并自动进入管理员页面：
+默认会读取 `.env` 中唯一的 `REVIEW_BASE_URL`，并自动进入管理员页面，例如：
 
 ```text
-http://10.105.194.180:8501/?view=admin
+http://10.105.194.152:8501/?view=admin
 ```
 
-直接运行 `python -m streamlit run app.py`、`start_demo.bat` 或 `start_server.bat` 时均不会再自动打开 localhost。飞书审核链接和结果链接仍按各自 query 参数进入对应页面。
+`start_demo.bat` 和 `start_server.bat` 都调用 `tools/run_streamlit.py`；启动器会从同一个
+`REVIEW_BASE_URL` 解析主机和端口，不再在 TOML 或批处理文件中维护固定 IP。飞书审核链接和结果链接也使用该地址。
 
 #### 2. 内网审核服务模式
 
@@ -577,7 +578,7 @@ start_server.bat
 等价于：
 
 ```bash
-streamlit run app.py --server.address 0.0.0.0 --server.port 8501
+python tools/run_streamlit.py
 ```
 
 飞书机器人发送给用户的审核链接由环境变量 `REVIEW_BASE_URL` 生成，例如：
@@ -586,7 +587,8 @@ streamlit run app.py --server.address 0.0.0.0 --server.port 8501
 REVIEW_BASE_URL=http://工作站内网IP:8501
 ```
 
-审核和结果通知地址仍由 `REVIEW_BASE_URL` 控制；本机启动时自动打开的管理员地址由 `.streamlit/config.toml` 控制。
+审核链接、结果通知地址、Streamlit 对外显示地址和自动打开的管理员地址全部由
+`REVIEW_BASE_URL` 控制。IP 或端口变化后只需修改 `.env` 并完全重启服务。
 
 #### 3. 飞书机器人模式
 
