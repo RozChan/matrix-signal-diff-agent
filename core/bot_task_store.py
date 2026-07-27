@@ -5,6 +5,9 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import tempfile
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -17,6 +20,8 @@ except Exception:  # noqa: BLE001
     pass
 
 from .review_store import load_task_meta, save_task_meta, update_task_meta
+
+_SESSIONS_LOCK = threading.RLock()
 
 
 def utc_now_iso() -> str:
@@ -47,9 +52,37 @@ def new_review_token() -> str:
 
 def atomic_write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(path)
+    payload = json.dumps(data, ensure_ascii=False, indent=2)
+    last_error: PermissionError | None = None
+    for attempt in range(5):
+        tmp_name = ""
+        fd = -1
+        try:
+            fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fd = -1
+                fh.write(payload)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp_name, path)
+            return
+        except PermissionError as exc:
+            last_error = exc
+            if fd >= 0:
+                os.close(fd)
+            if tmp_name:
+                Path(tmp_name).unlink(missing_ok=True)
+            if attempt == 4:
+                raise
+            time.sleep(0.05 * (2**attempt))
+        except Exception:
+            if fd >= 0:
+                os.close(fd)
+            if tmp_name:
+                Path(tmp_name).unlink(missing_ok=True)
+            raise
+    if last_error:
+        raise last_error
 
 
 def read_json(path: Path, default: Any) -> Any:
@@ -74,6 +107,11 @@ def ensure_feishu_meta(task_path: Path, sender_id: str = "", chat_id: str = "", 
     meta.setdefault("feishu_chat_id", chat_id)
     meta.setdefault("feishu_source_message_id", source_message_id)
     meta.setdefault("feishu_progress_message_id", "")
+    meta.setdefault("feishu_progress_last_updated_at", "")
+    meta.setdefault("feishu_progress_last_stage", "")
+    meta.setdefault("feishu_progress_last_percent", 0)
+    meta.setdefault("feishu_progress_last_fingerprint", "")
+    meta.setdefault("feishu_progress_update_error", "")
     meta.setdefault("review_token", "")
     meta.setdefault("review_url", "")
     meta.setdefault("current_stage", "created")
@@ -114,6 +152,15 @@ def save_sessions(sessions: dict[str, Any], root: Path | None = None) -> None:
     atomic_write_json(sessions_path(root), sessions)
 
 
+def set_active_task_id(sender_id: str, task_id: str, chat_id: str = "", root: Path | None = None) -> None:
+    root = root or get_task_root()
+    with _SESSIONS_LOCK:
+        sessions = load_sessions(root)
+        now = utc_now_iso()
+        sessions[sender_id] = {"task_id": task_id, "chat_id": chat_id, "created_at": now, "updated_at": now}
+        save_sessions(sessions, root)
+
+
 def create_upload_session(sender_id: str, chat_id: str = "", source_message_id: str = "", root: Path | None = None) -> dict[str, Any]:
     root = root or get_task_root()
     tid = new_task_id()
@@ -127,9 +174,7 @@ def create_upload_session(sender_id: str, chat_id: str = "", source_message_id: 
 
     create_task_meta(tdir, tid, status="created")
     ensure_feishu_meta(tdir, sender_id, chat_id, source_message_id)
-    sessions = load_sessions(root)
-    sessions[sender_id] = {"task_id": tid, "chat_id": chat_id, "created_at": utc_now_iso(), "updated_at": utc_now_iso()}
-    save_sessions(sessions, root)
+    set_active_task_id(sender_id, tid, chat_id, root)
     atomic_write_json(bot_dir(tdir) / "received_files.json", [])
     return {"task_id": tid, "task_dir": str(tdir)}
 
@@ -140,9 +185,10 @@ def get_active_task_id(sender_id: str, root: Path | None = None) -> str:
 
 
 def clear_active_session(sender_id: str, root: Path | None = None) -> None:
-    sessions = load_sessions(root)
-    sessions.pop(sender_id, None)
-    save_sessions(sessions, root)
+    with _SESSIONS_LOCK:
+        sessions = load_sessions(root)
+        sessions.pop(sender_id, None)
+        save_sessions(sessions, root)
 
 
 def append_bot_event(task_path: Path, event: dict[str, Any]) -> None:
