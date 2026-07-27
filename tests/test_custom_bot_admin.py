@@ -11,8 +11,7 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from core.admin_tasks import admin_token_valid, safe_task_dir
-from core.bot_task_store import build_review_url
+from core.admin_tasks import admin_token_valid, retry_admin_review_notification, safe_task_dir
 from core.feishu_custom_bot import FeishuCustomBotClient, generate_signature
 from core.notification_router import notify_result_ready, notify_review_ready, notify_task_failed, notify_task_started
 from core.result_access import allowed_result_files, ensure_result_access, resolve_allowed_result_file, result_token_valid
@@ -25,14 +24,22 @@ class FakeResponse:
 
 
 class FakeSession:
-    def __init__(self): self.calls = []
-    def post(self, url, json, timeout): self.calls.append((url, json, timeout)); return FakeResponse()
+    def __init__(self):
+        self.calls = []
+
+    def post(self, url, json, timeout):
+        self.calls.append((url, json, timeout))
+        return FakeResponse()
 
 
 class FakeCustomClient:
-    def __init__(self, fail=False): self.cards = []; self.fail = fail
+    def __init__(self, fail=False):
+        self.cards = []
+        self.fail = fail
+
     def send_card(self, title, markdown, **kwargs):
-        if self.fail: raise RuntimeError("webhook unavailable")
+        if self.fail:
+            raise RuntimeError("webhook unavailable")
         self.cards.append((title, markdown, kwargs))
 
 
@@ -78,7 +85,7 @@ def test_started_review_failed_result_notifications_are_idempotent(tmp_path: Pat
     assert notify_task_started(tdir, custom_client=client)
     assert notify_task_started(tdir, custom_client=client)
     assert len(client.cards) == 1
-    update_task_meta(tdir, status="awaiting_review", review_url="https://review/task", input_40_count=2, input_51_count=3, signal_total=4)
+    update_task_meta(tdir, status="awaiting_review", review_url="https://review/task", input_40_count=2, input_51_count=3, signal_total=4, pending_manual_count=4)
     assert notify_review_ready(tdir, custom_client=client)
     assert notify_review_ready(tdir, custom_client=client)
     assert len(client.cards) == 2 and client.cards[-1][2]["button_url"] == "https://review/task"
@@ -93,6 +100,50 @@ def test_started_review_failed_result_notifications_are_idempotent(tmp_path: Pat
     assert notify_result_ready(tdir, custom_client=client)
     assert notify_result_ready(tdir, custom_client=client)
     assert len(client.cards) == 4 and "result_token=" in client.cards[-1][2]["button_url"]
+
+
+def test_review_notice_mentions_configured_reviewer_and_uses_pending_count(tmp_path: Path, monkeypatch) -> None:
+    tdir = task(tmp_path)
+    update_task_meta(
+        tdir,
+        status="awaiting_review",
+        review_url="https://review/task?task_id=task1&token=secure",
+        pending_manual_count=2,
+        history_reused_count=3,
+        signal_total=99,
+    )
+    monkeypatch.setenv("FEISHU_REVIEW_AT_OPEN_IDS", "ou_reviewer,invalid,oc_chat")
+    client = FakeCustomClient()
+
+    assert notify_review_ready(tdir, custom_client=client)
+    markdown = client.cards[0][1]
+    assert "<at id=ou_reviewer>审核人</at>" in markdown
+    assert "待人工确认：2项" in markdown
+    assert "历史人工复用：3项" in markdown
+    assert "99" not in markdown
+
+
+def test_review_notice_is_skipped_without_pending_items(tmp_path: Path) -> None:
+    tdir = task(tmp_path)
+    update_task_meta(tdir, status="awaiting_review", review_url="https://review/task", pending_manual_count=0)
+    client = FakeCustomClient()
+    assert not notify_review_ready(tdir, custom_client=client)
+    assert client.cards == []
+
+
+def test_admin_can_force_resend_review_notice_without_rerunning_task(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("TASK_ROOT_DIR", str(tmp_path))
+    tdir = task(tmp_path)
+    update_task_meta(tdir, status="awaiting_review", review_url="https://review/task", pending_manual_count=1)
+    calls: list[tuple[Path, bool]] = []
+
+    def fake_notify(task_dir: Path, *, force: bool = False, **_kwargs) -> bool:
+        calls.append((task_dir, force))
+        return True
+
+    monkeypatch.setattr("core.notification_router.notify_review_ready", fake_notify)
+    assert retry_admin_review_notification("task1")
+    assert calls == [(tdir.resolve(), True)]
 
 
 def test_notification_failure_is_recorded_without_failing_task(tmp_path: Path) -> None:
@@ -120,8 +171,10 @@ def test_admin_token_and_task_path_protection(tmp_path: Path, monkeypatch) -> No
     tdir = tmp_path / "task1"
     create_task_meta(tdir, "task1")
     assert safe_task_dir("task1") == tdir.resolve()
-    with pytest.raises(ValueError): safe_task_dir("../secret")
-    with pytest.raises(FileNotFoundError): safe_task_dir("missing")
+    with pytest.raises(ValueError):
+        safe_task_dir("../secret")
+    with pytest.raises(FileNotFoundError):
+        safe_task_dir("missing")
 
 
 def test_result_token_and_allowlist_prevent_traversal(tmp_path: Path, monkeypatch) -> None:

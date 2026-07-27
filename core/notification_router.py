@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -35,7 +36,7 @@ def _admin_url() -> str:
     return f"{base}/?{urlencode({'view': 'admin'})}"
 
 
-def _custom_once(task_dir: Path, event: str, title: str, markdown: str, *, button_text: str = "", button_url: str = "", client: FeishuCustomBotClient | None = None) -> bool:
+def _custom_once(task_dir: Path, event: str, title: str, markdown: str, *, button_text: str = "", button_url: str = "", client: FeishuCustomBotClient | None = None, force: bool = False) -> bool:
     tdir = Path(task_dir)
     prefix = f"custom_bot_{event}"
     fingerprint = hashlib.sha256(json.dumps([title, markdown, button_text, button_url], ensure_ascii=False).encode("utf-8")).hexdigest()
@@ -43,10 +44,10 @@ def _custom_once(task_dir: Path, event: str, title: str, markdown: str, *, butto
         meta = load_task_meta(tdir)
         if notification_channel(meta) != "feishu_custom_bot":
             return False
-        if meta.get(f"{prefix}_status") in {"sending", "sent"} and meta.get(f"{prefix}_fingerprint") == fingerprint:
+        if not force and meta.get(f"{prefix}_status") in {"sending", "sent"} and meta.get(f"{prefix}_fingerprint") == fingerprint:
             return meta.get(f"{prefix}_status") == "sent"
         max_attempts = max(1, int(os.getenv("FEISHU_CUSTOM_BOT_MAX_ATTEMPTS", "3")))
-        if meta.get(f"{prefix}_status") == "failed" and int(meta.get(f"{prefix}_attempt_count") or 0) >= max_attempts:
+        if not force and meta.get(f"{prefix}_status") == "failed" and int(meta.get(f"{prefix}_attempt_count") or 0) >= max_attempts:
             return False
         update_task_meta(
             tdir,
@@ -88,7 +89,13 @@ def notify_task_failed(task_dir: Path, *, custom_client: FeishuCustomBotClient |
     return _custom_once(Path(task_dir), "failed", "信号矩阵全量对比任务失败", text, button_text="进入管理员页面", button_url=_admin_url(), client=custom_client)
 
 
-def notify_review_ready(task_dir: Path, *, enterprise_client: Any | None = None, custom_client: FeishuCustomBotClient | None = None) -> bool:
+def _review_mentions() -> str:
+    open_ids = [item.strip() for item in os.getenv("FEISHU_REVIEW_AT_OPEN_IDS", "").split(",") if item.strip()]
+    valid_ids = [item for item in open_ids if re.fullmatch(r"ou_[A-Za-z0-9]+", item)]
+    return " ".join(f"<at id={open_id}>审核人</at>" for open_id in valid_ids)
+
+
+def notify_review_ready(task_dir: Path, *, enterprise_client: Any | None = None, custom_client: FeishuCustomBotClient | None = None, force: bool = False) -> bool:
     tdir = Path(task_dir)
     meta = load_task_meta(tdir)
     channel = notification_channel(meta)
@@ -100,12 +107,18 @@ def notify_review_ready(task_dir: Path, *, enterprise_client: Any | None = None,
         return notify_enterprise_review(enterprise_client, tdir, meta)
     if channel != "feishu_custom_bot" or meta.get("status") != "awaiting_review" or not meta.get("review_url"):
         return False
+    pending_count = int(meta.get("pending_manual_count") or 0)
+    if pending_count <= 0:
+        return False
+    mention = _review_mentions()
     text = (
-        f"任务编号：{meta.get('task_id', tdir.name)}\n4.0输入Excel：{int(meta.get('input_40_count') or 0)}个\n"
+        (f"{mention}\n" if mention else "")
+        + f"任务编号：{meta.get('task_id', tdir.name)}\n4.0输入Excel：{int(meta.get('input_40_count') or 0)}个\n"
         f"5.1输入Excel：{int(meta.get('input_51_count') or 0)}个\n历史版本跳过：{int(meta.get('full_compare_skipped_history_count') or 0)}个\n"
-        f"待审核差异项：{int(meta.get('signal_total') or 0)}个"
+        f"待人工确认：{pending_count}项\n历史人工复用：{int(meta.get('history_reused_count') or 0)}项\n"
+        f"生成时间：{beijing_time(meta.get('updated_at') or meta.get('created_at'))}"
     )
-    return _custom_once(tdir, "review_ready", "信号矩阵全量对比审核已就绪", text, button_text="进入人工审核", button_url=str(meta["review_url"]), client=custom_client)
+    return _custom_once(tdir, "review_ready", "信号差异人工审核已就绪", text, button_text="打开人工审核页面", button_url=str(meta["review_url"]), client=custom_client, force=force)
 
 
 def notify_result_ready(task_dir: Path, *, custom_client: FeishuCustomBotClient | None = None) -> bool:

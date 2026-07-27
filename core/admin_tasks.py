@@ -67,6 +67,8 @@ def list_admin_tasks(limit: int = 50) -> list[dict[str, Any]]:
             "review_url": meta.get("review_url", ""),
             "result_url": meta.get("result_url", ""),
             "result_delivery_status": meta.get("result_delivery_status", ""),
+            "pending_manual_count": int(meta.get("pending_manual_count") or 0),
+            "review_notification_status": meta.get("custom_bot_review_ready_status", ""),
         })
     rows.sort(key=lambda item: str(item.get("created_at") or item.get("task_id")), reverse=True)
     return rows[:limit]
@@ -114,6 +116,23 @@ def retry_admin_confluence(task_id: str, actor: str = "admin_web") -> int:
     for item in failed:
         threading.Thread(target=_download_confluence_source, args=(task_id, tdir, {**item, "status": "pending", "errors": []}, client, ""), daemon=True).start()
     return len(failed)
+
+
+def retry_admin_review_notification(task_id: str, actor: str = "admin_web") -> bool:
+    """Resend only the review link; never rerun task processing."""
+    tdir = safe_task_dir(task_id)
+    with get_task_lock(tdir):
+        meta = load_task_meta(tdir)
+        if meta.get("status") != "awaiting_review":
+            raise ValueError("当前任务不处于待人工审核状态")
+        if int(meta.get("pending_manual_count") or 0) <= 0:
+            raise ValueError("当前任务没有待人工确认项")
+        if not meta.get("review_url"):
+            raise ValueError("当前任务缺少审核链接")
+        _record_action(tdir, "retry_review_notification", actor)
+    from .notification_router import notify_review_ready
+
+    return notify_review_ready(tdir, force=True)
 
 
 def admin_system_status() -> dict[str, Any]:

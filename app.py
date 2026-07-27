@@ -27,7 +27,7 @@ from core.pipeline import OUTPUT_FILENAMES
 from core.result_notifier import build_results_zip
 from core.result_access import allowed_result_files, ensure_result_access, result_token_valid
 from core.notification_router import notify_result_ready
-from core.admin_tasks import admin_system_status, admin_token_valid, cancel_admin_task, create_admin_full_compare, list_admin_tasks, retry_admin_confluence, safe_task_dir
+from core.admin_tasks import admin_system_status, admin_token_valid, cancel_admin_task, create_admin_full_compare, list_admin_tasks, retry_admin_confluence, retry_admin_review_notification, safe_task_dir
 from core.task_progress import allowed_admin_actions, beijing_time, build_task_progress, choose_default_task, status_label, trigger_label
 from core.review_table import pending_review_count
 from core.review_history import history_database_path
@@ -658,6 +658,15 @@ def _show_admin_page() -> None:
                 st.rerun()
         if row.get("review_url"):
             st.link_button("进入人工审核", row["review_url"])
+        if row.get("status") == "awaiting_review" and int(row.get("pending_manual_count") or 0) > 0:
+            if st.button("重新发送审核通知", key=f"admin-retry-review-notice-{selected}"):
+                try:
+                    if retry_admin_review_notification(selected):
+                        st.success("审核通知已重新发送。")
+                    else:
+                        st.error("审核通知发送失败，请检查群机器人配置。")
+                except Exception as exc:  # noqa: BLE001
+                    st.error(str(exc))
         if row.get("result_url"):
             st.link_button("进入结果下载页", row["result_url"])
 
