@@ -142,6 +142,12 @@ def selected_grid_row_id(selected_rows: Any) -> str:
     return str(records[0].get("row_id") or "") if records else ""
 
 
+def field_detail_state_key(detail_key: str, field_name: str) -> str:
+    """Keep description and unit detail selections independent."""
+
+    return f"{detail_key}-{field_name}"
+
+
 def grid_column_layout(field_name: str) -> dict[str, dict[str, Any]]:
     """Return bounded responsive widths so every business column fits onscreen."""
 
@@ -210,7 +216,7 @@ def _render_detail(item: dict[str, Any], field_key: str, review: dict[str, Any],
     matching = [diff for diff in item.get("field_diffs") or [] if diff.get("diff_field") == field_name]
     occurrence = int(field_key.split("#", 1)[1]) if "#" in field_key else 1
     diff = matching[occurrence - 1] if len(matching) >= occurrence else {}
-    with st.expander("当前信号详细信息", expanded=True):
+    with st.expander(f"当前{field_name}详细信息", expanded=True):
         c1, c2 = st.columns(2)
         c1.write(f"EEA4.0信号名：{item.get('signal_40') or '<空>'}")
         c2.write(f"EEA5.1信号名：{item.get('signal_51') or '<空>'}")
@@ -227,7 +233,7 @@ def _render_detail(item: dict[str, Any], field_key: str, review: dict[str, Any],
             )
 
 
-def _render_field_table(field_name: str, task_id: str, items: list[dict[str, Any]], state: dict[str, Any], can_edit: bool, drafts_key: str, dirty_key: str, detail_key: str, version_key: str) -> bool:
+def _render_field_table(field_name: str, task_id: str, items: list[dict[str, Any]], state: dict[str, Any], can_edit: bool, drafts_key: str, dirty_key: str, detail_key: str, version_key: str, display_text: Callable[[Any], str]) -> bool:
     state_items = state.get("items", {})
     drafts = st.session_state.setdefault(drafts_key, {})
     rows = field_rows(items, state_items, field_name, drafts)
@@ -258,16 +264,25 @@ def _render_field_table(field_name: str, task_id: str, items: list[dict[str, Any
     dirty = set(st.session_state.setdefault(dirty_key, []))
     st.session_state[dirty_key] = sorted(capture_grid_changes(returned_rows, grid_rows, state_items, drafts, dirty))
     chosen = selected_grid_row_id(response.get("selected_rows") if hasattr(response, "get") else None)
+    field_detail_key = field_detail_state_key(detail_key, field_name)
     if chosen:
-        st.session_state[detail_key] = chosen
+        st.session_state[field_detail_key] = chosen
     _, save_column = st.columns([8, 1])
-    return save_column.button(
+    save_clicked = save_column.button(
         "保存修改",
         disabled=not can_edit or not st.session_state[dirty_key],
         key=f"save-{field_name}-{task_id}",
         type="primary",
         use_container_width=True,
     )
+    selected = str(st.session_state.get(field_detail_key) or "")
+    if "::" in selected:
+        item_id, field_key = selected.split("::", 1)
+        if field_key.split("#", 1)[0] == field_name:
+            item = next((candidate for candidate in items if candidate.get("item_id") == item_id), None)
+            if item:
+                _render_detail(item, field_key, state.get("items", {}).get(item_id, {}), display_text)
+    return save_clicked
 
 
 def _save_review_changes(task_dir, review_dir, task_id: str, state: dict[str, Any], session_id: str, drafts_key: str, dirty_key: str) -> dict[str, Any]:
@@ -311,7 +326,7 @@ def render_compact_review(task_dir, review_dir, task_id: str, items: list[dict[s
         st.success("所有需要人工确认的描述值和单位均已完成。")
     for field_name in table_order:
         st.subheader("信号值描述判断" if field_name == "信号值描述" else "单位判断")
-        save_clicked = _render_field_table(field_name, task_id, items, state, can_edit, drafts_key, dirty_key, detail_key, version_key)
+        save_clicked = _render_field_table(field_name, task_id, items, state, can_edit, drafts_key, dirty_key, detail_key, version_key, display_text)
         if save_clicked:
             try:
                 state = _save_review_changes(task_dir, review_dir, task_id, state, session_id, drafts_key, dirty_key)
@@ -321,10 +336,4 @@ def render_compact_review(task_dir, review_dir, task_id: str, items: list[dict[s
                 st.success("人工确认结果已保存。")
                 st.rerun()
 
-    selected = str(st.session_state.get(detail_key) or "")
-    if "::" in selected:
-        item_id, field_key = selected.split("::", 1)
-        item = next((candidate for candidate in items if candidate.get("item_id") == item_id), None)
-        if item:
-            _render_detail(item, field_key, state.get("items", {}).get(item_id, {}), display_text)
     return load_review_state(review_dir), len(st.session_state.get(dirty_key, []))
