@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -13,11 +14,25 @@ FIELD_RESULTS = ("same", "different")
 REVIEWABLE_FIELDS = ("信号值描述", "单位")
 
 
+def format_multiline_enum_value(value: Any) -> str:
+    """Put each hexadecimal enumeration on its own display line only."""
+
+    text = str(value or "").strip()
+    if not text:
+        return "<空>"
+    return re.sub(
+        r"\s+(?=0[xX][0-9A-Fa-f]+(?:\s*[-~]\s*0[xX][0-9A-Fa-f]+)?\s*:)",
+        "\n",
+        text,
+    )
+
+
 def result_display(field_name: str, value: Any) -> str:
     result = str(value or "")
     if result not in FIELD_RESULTS:
         return PENDING_REVIEW_LABEL
-    return f"🟢 {field_name}{'相同' if result == 'same' else '不同'}"
+    label = "描述值" if field_name.split("#", 1)[0] == "信号值描述" else "单位"
+    return f"🟢 {label}{'相同' if result == 'same' else '不同'}"
 
 
 def result_value(value: Any) -> str:
@@ -55,8 +70,8 @@ def field_rows(items: list[dict[str, Any]], state_items: dict[str, Any], field_n
                 "row_id": row_id, "item_id": item["item_id"], "field_key": field_key, "序号": sequence,
                 "EEA4.0信号名": str(item.get("signal_40") or "<空>"),
                 "EEA5.1信号名": str(item.get("signal_51") or "<空>"),
-                f"EEA4.0{field_name}": str(diff.get("value_40") or "<空>"),
-                f"EEA5.1{field_name}": str(diff.get("value_51") or "<空>"),
+                f"EEA4.0{field_name}": format_multiline_enum_value(diff.get("value_40")) if field_name == "信号值描述" else str(diff.get("value_40") or "<空>"),
+                f"EEA5.1{field_name}": format_multiline_enum_value(diff.get("value_51")) if field_name == "信号值描述" else str(diff.get("value_51") or "<空>"),
                 "AI判断结果": str(item.get("signal_ai_judgement") or ""),
                 "人工确认": result_display(field_name, draft.get("result", review.get("result", ""))),
             })

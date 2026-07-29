@@ -36,7 +36,7 @@ def aggrid_key(field_name: str, task_id: str, can_edit: bool = True) -> str:
     # Increment the suffix only when the grid schema changes. This resets stale
     # browser-side column widths once while remaining stable across normal edits.
     mode = "edit" if can_edit else "view"
-    return f"review-aggrid-v5-{mode}-{field_name}-{task_id}"
+    return f"review-aggrid-v6-{mode}-{field_name}-{task_id}"
 
 
 def review_phase(items: list[dict[str, Any]], state_items: dict[str, Any]) -> tuple[str, int, int]:
@@ -51,6 +51,12 @@ def review_phase(items: list[dict[str, Any]], state_items: dict[str, Any]) -> tu
     if unit_pending:
         return "unit", 0, unit_pending
     return "complete", 0, 0
+
+
+def review_table_order(items: list[dict[str, Any]], state_items: dict[str, Any]) -> list[str]:
+    """Return all applicable tables in their fixed on-page order."""
+
+    return [field for field in ("信号值描述", "单位") if field_rows(items, state_items, field)]
 
 
 def system_difference_rows(items: list[dict[str, Any]]) -> list[dict[str, str]]:
@@ -163,8 +169,16 @@ def _grid_options(frame: pd.DataFrame, field_name: str, can_edit: bool) -> dict[
     builder.configure_column("EEA4.0信号名", **layout["EEA4.0信号名"])
     builder.configure_column("EEA5.1信号名", **layout["EEA5.1信号名"])
     for value_column in (f"EEA4.0{field_name}", f"EEA5.1{field_name}"):
+        value_style = {
+            "whiteSpace": "pre-line",
+            "lineHeight": "20px",
+            "maxHeight": "72px",
+            "overflowY": "auto",
+        } if field_name == "信号值描述" else None
         builder.configure_column(
             value_column, tooltipField=value_column,
+            wrapText=field_name == "信号值描述",
+            cellStyle=value_style,
             **layout[value_column],
         )
     builder.configure_column("AI判断结果", **layout["AI判断结果"])
@@ -186,6 +200,7 @@ def _grid_options(frame: pd.DataFrame, field_name: str, can_edit: bool) -> dict[
         paginationPageSizeSelector=[10, 20, 50, 100],
         animateRows=False,
         tooltipShowDelay=300,
+        rowHeight=84 if field_name == "信号值描述" else 42,
     )
     return builder.build()
 
@@ -234,7 +249,7 @@ def _render_field_table(field_name: str, task_id: str, items: list[dict[str, Any
         allow_unsafe_jscode=True,
         fit_columns_on_grid_load=True,
         reload_data=False,
-        height=min(720, 42 * (min(len(rows), 20) + 2) + 48),
+        height=min(720, (84 if field_name == "信号值描述" else 42) * (min(len(rows), 20) + 1) + 48),
         theme="streamlit",
         key=aggrid_key(field_name, task_id, can_edit),
     )
@@ -260,27 +275,15 @@ def render_compact_review(task_dir, review_dir, task_id: str, items: list[dict[s
 
     drafts_key, dirty_key, detail_key, version_key, _drafts = initialize_review_session(st.session_state, task_id)
     state_items = state.get("items", {})
-    phase, description_pending, unit_pending = review_phase(items, state_items)
-    has_descriptions = bool(field_rows(items, state_items, "信号值描述"))
-    has_units = bool(field_rows(items, state_items, "单位"))
-    if phase == "description":
-        st.info(f"请先完成信号值描述确认；完成并保存后再进入单位确认。当前剩余 {description_pending} 项。")
-        _render_field_table("信号值描述", task_id, items, state, can_edit, drafts_key, dirty_key, detail_key, version_key)
-    elif phase == "unit":
-        st.success("信号值描述确认已完成。")
-        st.info(f"请完成单位确认。当前剩余 {unit_pending} 项。")
-        _render_field_table("单位", task_id, items, state, can_edit, drafts_key, dirty_key, detail_key, version_key)
-        if has_descriptions:
-            with st.expander("查看或修改已完成的信号值描述确认", expanded=False):
-                _render_field_table("信号值描述", task_id, items, state, can_edit, drafts_key, dirty_key, detail_key, version_key)
+    _phase, description_pending, unit_pending = review_phase(items, state_items)
+    table_order = review_table_order(items, state_items)
+    if description_pending or unit_pending:
+        st.info(f"请完成全部人工确认：描述值剩余 {description_pending} 项，单位剩余 {unit_pending} 项。")
     else:
-        st.success("所有需要人工确认的信号值描述和单位均已完成。")
-        if has_descriptions:
-            with st.expander("查看或修改信号值描述确认", expanded=False):
-                _render_field_table("信号值描述", task_id, items, state, can_edit, drafts_key, dirty_key, detail_key, version_key)
-        if has_units:
-            with st.expander("查看或修改单位确认", expanded=False):
-                _render_field_table("单位", task_id, items, state, can_edit, drafts_key, dirty_key, detail_key, version_key)
+        st.success("所有需要人工确认的描述值和单位均已完成。")
+    for field_name in table_order:
+        st.subheader("信号值描述判断" if field_name == "信号值描述" else "单位判断")
+        _render_field_table(field_name, task_id, items, state, can_edit, drafts_key, dirty_key, detail_key, version_key)
 
     dirty = set(st.session_state.setdefault(dirty_key, []))
     if st.button("保存所有未保存修改", disabled=not can_edit or not dirty, key=f"save-fields-{task_id}", type="primary"):

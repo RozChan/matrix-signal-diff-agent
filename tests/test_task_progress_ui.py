@@ -9,9 +9,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.confluence_task_store import add_sources, update_source
 from core.review_store import acquire_review_lock, compute_review_stats, create_task_meta, init_review_state, update_task_meta
-from core.review_table import PENDING_REVIEW_LABEL, apply_editor_changes, field_rows, pending_review_count, result_display, save_dirty_reviews
+from core.review_table import PENDING_REVIEW_LABEL, apply_editor_changes, field_rows, format_multiline_enum_value, pending_review_count, result_display, save_dirty_reviews
 from core.task_progress import ACTIVE_STATUSES, allowed_admin_actions, beijing_time, build_task_progress, choose_default_task, overall_percent
-from ui.review_table import aggrid_key, capture_grid_changes, chinese_review_stats, grid_column_layout, initialize_review_session, review_phase, selected_grid_row_id, system_difference_rows
+from ui.review_table import aggrid_key, capture_grid_changes, chinese_review_stats, grid_column_layout, initialize_review_session, review_phase, review_table_order, selected_grid_row_id, system_difference_rows
 
 
 def make_task(tmp_path: Path, task_id: str = "task1") -> Path:
@@ -86,6 +86,20 @@ def test_description_and_unit_rows_have_required_columns_and_stable_ids(tmp_path
     assert pending_review_count(state) == 2
 
 
+def test_review_labels_are_concise_and_field_specific() -> None:
+    assert result_display("信号值描述", "same") == "🟢 描述值相同"
+    assert result_display("信号值描述", "different") == "🟢 描述值不同"
+    assert result_display("单位", "same") == "🟢 单位相同"
+    assert result_display("单位", "different") == "🟢 单位不同"
+
+
+def test_enum_values_are_displayed_one_per_line_without_changing_content() -> None:
+    value = "0x0: Not crank 0x1-0x2: Reserved 0x3: Crank"
+    assert format_multiline_enum_value(value) == "0x0: Not crank\n0x1-0x2: Reserved\n0x3: Crank"
+    assert format_multiline_enum_value("0x0: A\n0x1: B") == "0x0: A\n0x1: B"
+    assert format_multiline_enum_value("") == "<空>"
+
+
 def test_numeric_signals_are_excluded_from_manual_tables_and_listed_as_system_differences(tmp_path: Path) -> None:
     items = [review_item("text"), review_item("mixed", with_numeric=True)]
     state = init_review_state(tmp_path / "review", "task", items)
@@ -109,6 +123,7 @@ def test_review_phase_requires_descriptions_before_units(tmp_path: Path) -> None
     assert stats["unit_only_signals"] == 1
     assert stats["description_and_unit_signals"] == 1
     assert review_phase(items, state["items"]) == ("description", 2, 2)
+    assert review_table_order(items, state["items"]) == ["信号值描述", "单位"]
     for item_id in ("description", "both"):
         field = state["items"][item_id]["field_reviews"]["信号值描述"]
         field.update(result="same", reviewed=True, decision_source="manual")
@@ -117,6 +132,12 @@ def test_review_phase_requires_descriptions_before_units(tmp_path: Path) -> None
         field = state["items"][item_id]["field_reviews"]["单位"]
         field.update(result="same", reviewed=True, decision_source="manual")
     assert review_phase(items, state["items"]) == ("complete", 0, 0)
+
+
+def test_review_table_order_omits_unit_table_when_no_unit_differences(tmp_path: Path) -> None:
+    items = [review_item("description")]
+    state = init_review_state(tmp_path / "review", "task", items)
+    assert review_table_order(items, state["items"]) == ["信号值描述"]
 
 
 def test_binary_editor_drafts_only_mark_changed_fields() -> None:
