@@ -41,7 +41,6 @@ from core.review_store import (
     generate_review_items_from_excel,
     init_review_state,
     load_review_items,
-    load_review_state,
     load_task_meta,
     heartbeat_review_lock,
     is_signal_level_item,
@@ -485,6 +484,42 @@ def _show_admin_review_results(task_dir: Path) -> None:
         st.info("当前任务尚未生成可查询的审核数据。")
     _show_downloads(task_dir)
 
+def _show_admin_page() -> None:
+    st.title("管理员任务管理")
+    if os.getenv("ADMIN_PAGE_ENABLED", "false").lower() != "true":
+        st.error("管理员页面未启用。")
+        return
+    if not st.session_state.get("admin_authenticated"):
+        token = st.text_input("管理员访问Token", type="password")
+        if st.button("登录管理员页面"):
+            if admin_token_valid(token):
+                st.session_state["admin_authenticated"] = True
+                st.rerun()
+            else:
+                st.error("管理员Token错误。")
+        return
+    status = admin_system_status()
+    st.subheader("系统状态")
+    st.json(status)
+    render_admin_history(history_database_path())
+    st.subheader("手动创建全量任务")
+    st.write(f"4.0父页面：{os.getenv('FULL_COMPARE_40_PARENT_URL', '') or '<未配置>'}")
+    st.write(f"5.1父页面：{os.getenv('FULL_COMPARE_51_PARENT_URL', '') or '<未配置>'}")
+    st.write(f"最新版本选择：{os.getenv('CONFLUENCE_PARENT_SELECT_LATEST_VERSION', 'true')}")
+    st.write(f"严格模式：{os.getenv('CONFLUENCE_LATEST_VERSION_STRICT', 'true')}｜通知方式：飞书群自定义机器人")
+    confirm = st.checkbox("确认启动一次4.0与5.1全量信号对比")
+    if "admin_create_operation_id" not in st.session_state:
+        st.session_state["admin_create_operation_id"] = f"admin:{secrets.token_urlsafe(18)}"
+    if st.button("创建自动全量任务", disabled=not confirm):
+        try:
+            result = create_admin_full_compare(st.session_state["admin_create_operation_id"])
+            st.session_state["admin_create_operation_id"] = f"admin:{secrets.token_urlsafe(18)}"
+            st.session_state["admin_selected_task_id"] = result.task_id
+            st.session_state["admin_selector_version"] = int(st.session_state.get("admin_selector_version", 0)) + 1
+            st.success(f"任务已创建：{result.task_id}")
+            st.rerun()
+        except Exception as exc:  # noqa: BLE001
+            st.error(str(exc))
 
 def _show_final_export(task_dir: Path, review_dir: Path, *, session_id: str, can_edit: bool, dirty_count: int = 0, pending_count: int = 0) -> None:
     final_path = _output_dir(task_dir) / FINAL_REVIEW_FILENAME
