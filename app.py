@@ -639,6 +639,130 @@ def _show_admin_page() -> None:
             st.link_button("进入结果下载页", row["result_url"])
 
 
+def _show_result_page(task_id: str, token: str) -> None:
+    try:
+        tdir = safe_task_dir(task_id)
+    except (ValueError, FileNotFoundError):
+        st.error("任务不存在或task_id无效。")
+        return
+    if not result_token_valid(tdir, token):
+        st.error("结果下载链接无效或无权访问。")
+        return
+    meta = load_task_meta(tdir)
+    st.title("信号矩阵全量对比结果下载")
+    st.write(f"任务编号：{task_id}")
+    st.write(f"任务状态：{meta.get('status', '')}")
+    if meta.get("status") in {"cancelled", "failed"}:
+        st.warning(f"任务未正常完成：{meta.get('error') or meta.get('current_stage') or ''}")
+        return
+    if meta.get("status") not in {"final_exported", "delivered"}:
+        st.info("最终结果尚未生成。")
+        return
+    files = allowed_result_files(tdir)
+    if not files:
+        st.warning("没有可下载的结果文件。")
+        return
+    for path in files:
+        mime = "application/zip" if path.suffix.lower() == ".zip" else ("application/json" if path.suffix.lower() == ".json" else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button(f"下载 {path.name}", path.read_bytes(), file_name=path.name, mime=mime, key=f"result-{task_id}-{path.name}")
+
+
+def _show_admin_page() -> None:
+    st.title("管理员任务管理")
+    if os.getenv("ADMIN_PAGE_ENABLED", "false").lower() != "true":
+        st.error("管理员页面未启用。")
+        return
+    if not st.session_state.get("admin_authenticated"):
+        token = st.text_input("管理员访问Token", type="password")
+        if st.button("登录管理员页面"):
+            if admin_token_valid(token):
+                st.session_state["admin_authenticated"] = True
+                st.rerun()
+            else:
+                st.error("管理员Token错误。")
+        return
+    status = admin_system_status()
+    st.subheader("系统状态")
+    st.json(status)
+    render_admin_history(history_database_path())
+    st.subheader("手动创建全量任务")
+    st.write(f"4.0父页面：{os.getenv('FULL_COMPARE_40_PARENT_URL', '') or '<未配置>'}")
+    st.write(f"5.1父页面：{os.getenv('FULL_COMPARE_51_PARENT_URL', '') or '<未配置>'}")
+    st.write(f"最新版本选择：{os.getenv('CONFLUENCE_PARENT_SELECT_LATEST_VERSION', 'true')}")
+    st.write(f"严格模式：{os.getenv('CONFLUENCE_LATEST_VERSION_STRICT', 'true')}｜通知方式：飞书群自定义机器人")
+    confirm = st.checkbox("确认启动一次4.0与5.1全量信号对比")
+    if "admin_create_operation_id" not in st.session_state:
+        st.session_state["admin_create_operation_id"] = f"admin:{secrets.token_urlsafe(18)}"
+    if st.button("创建自动全量任务", disabled=not confirm):
+        try:
+            result = create_admin_full_compare(st.session_state["admin_create_operation_id"])
+            st.session_state["admin_create_operation_id"] = f"admin:{secrets.token_urlsafe(18)}"
+            st.session_state["admin_selected_task_id"] = result.task_id
+            st.session_state["admin_selector_version"] = int(st.session_state.get("admin_selector_version", 0)) + 1
+            st.success(f"任务已创建：{result.task_id}")
+            st.rerun()
+        except Exception as exc:  # noqa: BLE001
+            st.error(str(exc))
+
+    rows = list_admin_tasks()
+    preferred = str(st.session_state.get("admin_selected_task_id") or st.query_params.get("admin_task_id", ""))
+    selected_default = choose_default_task(rows, preferred)
+    labels = {
+        row["task_id"]: f"{row['task_id']}｜{status_label(row['status'])}｜{trigger_label(row['trigger_source'])}｜{row['created_at_display']}"
+        for row in rows
+    }
+    task_ids = list(labels)
+    selected = st.selectbox(
+        "查看任务",
+        task_ids,
+        index=task_ids.index(selected_default) if selected_default in task_ids else 0,
+        format_func=lambda task_id: labels[task_id],
+        key=f"admin-task-selector-{int(st.session_state.get('admin_selector_version', 0))}",
+    ) if task_ids else ""
+    if selected:
+        st.session_state["admin_selected_task_id"] = selected
+        st.query_params["admin_task_id"] = selected
+        initial = build_task_progress(safe_task_dir(selected))
+        snapshot = render_live_task_progress(selected, initial["active"])
+
+    st.subheader("最近任务列表")
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    if selected:
+        row = next(item for item in rows if item["task_id"] == selected)
+        actions = allowed_admin_actions(row["status"])
+        st.subheader("当前任务操作")
+        with st.expander("查看任务详情", expanded=False):
+            st.json(snapshot)
+        if "cancel" in actions:
+            confirm_cancel = st.checkbox("确认取消当前运行任务", key=f"confirm-cancel-{selected}")
+            if st.button("取消任务", key=f"admin-cancel-{selected}", disabled=not confirm_cancel):
+                st.success("任务已取消。" if cancel_admin_task(selected) else "任务已取消或当前状态不允许取消。")
+                st.rerun()
+        if "retry_confluence" in actions and st.button("重试失败的Confluence来源", key=f"admin-retry-{selected}"):
+            st.success(f"已启动 {retry_admin_confluence(selected)} 个失败来源重试。")
+            st.rerun()
+        if "recreate" in actions:
+            st.caption("已失败或取消的旧worker不会恢复；重新创建将生成新的task_id。")
+            if st.button("重新创建同类全量任务", key=f"admin-recreate-{selected}"):
+                result = create_admin_full_compare(f"admin:{secrets.token_urlsafe(18)}")
+                st.session_state["admin_selected_task_id"] = result.task_id
+                st.session_state["admin_selector_version"] = int(st.session_state.get("admin_selector_version", 0)) + 1
+                st.rerun()
+        if row.get("review_url"):
+            st.link_button("进入人工审核", row["review_url"])
+        if row.get("status") == "awaiting_review" and int(row.get("pending_manual_count") or 0) > 0:
+            if st.button("重新发送审核通知", key=f"admin-retry-review-notice-{selected}"):
+                try:
+                    if retry_admin_review_notification(selected):
+                        st.success("审核通知已重新发送。")
+                    else:
+                        st.error("审核通知发送失败，请检查群机器人配置。")
+                except Exception as exc:  # noqa: BLE001
+                    st.error(str(exc))
+        if row.get("result_url"):
+            st.link_button("进入结果下载页", row["result_url"])
+
+
 def main() -> None:
     st.set_page_config(page_title=APP_TITLE, layout="wide")
     view = str(st.query_params.get("view", ""))
