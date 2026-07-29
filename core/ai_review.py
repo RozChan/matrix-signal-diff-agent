@@ -35,11 +35,6 @@ REVIEW_HEADERS = [
     "置信度",
     "信号级AI判断理由",
     "信号级AI建议处理方式",
-    "需人工优先确认",
-    "系统默认结论",
-    "系统默认原因",
-    "人工审核结果",
-    "人工备注",
 ]
 
 ALLOWED_SIGNAL_JUDGEMENTS = {"真实差异", "疑似可忽略", "无法判断"}
@@ -143,6 +138,16 @@ def _build_signal_item(source_sheet: str, signal_40: str, signal_51: str, diff_t
         "field_diffs": field_diffs,
         "field_diff_details": _format_field_diffs(field_diffs),
     }
+
+
+def is_text_only_ai_candidate(item: dict[str, Any]) -> bool:
+    """Only description/unit-only signals are eligible for semantic AI review."""
+
+    field_diffs = item.get("field_diffs") or []
+    return bool(field_diffs) and all(
+        diff.get("field_type") == "text" and diff.get("diff_field") in TEXT_REVIEW_FIELDS
+        for diff in field_diffs
+    )
 
 
 def _iter_signal_items(wb) -> list[dict[str, Any]]:
@@ -255,7 +260,7 @@ def _ai_review(item: dict[str, Any]) -> dict[str, str]:
 def get_signal_level_ai_judgement(item: dict[str, Any], enable_ai: bool, llm_enabled: bool, stats: dict[str, Any]) -> dict[str, str]:
     if item.get("has_numeric_diff"):
         return _system_real_diff_review(item)
-    if not item.get("has_text_diff"):
+    if not is_text_only_ai_candidate(item):
         return _unknown_review("差异字段未解析或不属于可复核文本字段，需人工确认。")
     if not enable_ai or not llm_enabled:
         return _disabled_review()
@@ -274,14 +279,6 @@ def get_signal_level_ai_judgement(item: dict[str, Any], enable_ai: bool, llm_ena
         if warning not in stats["warnings"]:
             stats["warnings"].append(warning)
         return _unknown_review(f"AI辅助复核失败：{warning}")
-
-
-def _default_review_result(review: dict[str, str]) -> tuple[str, str, str]:
-    if review["signal_ai_judgement"] == "真实差异":
-        return "确认真实差异", "AI或规则判断该信号存在真实差异，系统默认保留；人工可修改", "否"
-    if review["signal_ai_judgement"] == "疑似可忽略":
-        return "", "AI判断该信号差异疑似可忽略，需人工优先确认", "是"
-    return "", "AI未给出可直接采用的结论，需人工确认", "否"
 
 
 def _stats_increment(stats: dict[str, Any], item: dict[str, Any], review: dict[str, str]) -> None:
@@ -324,7 +321,7 @@ def _style_sheet(ws) -> None:
             cell.alignment = Alignment(vertical="top", wrap_text=True)
     widths = {
         "A": 24, "B": 36, "C": 36, "D": 28, "E": 14, "F": 16, "G": 16, "H": 70, "I": 80,
-        "J": 18, "K": 20, "L": 12, "M": 55, "N": 20, "O": 16, "P": 18, "Q": 55, "R": 18, "S": 40,
+        "J": 18, "K": 20, "L": 12, "M": 55, "N": 20,
     }
     for letter, width in widths.items():
         ws.column_dimensions[letter].width = width
@@ -354,7 +351,7 @@ def run_ai_review(compare_file_path: Path, enable_ai: bool = False, progress_cal
     signal_items = _iter_signal_items(wb)
     total_signals = len(signal_items)
     total_fields = sum(int(item.get("diff_field_count") or 0) for item in signal_items)
-    ai_required_signals = sum(1 for item in signal_items if not item.get("has_numeric_diff") and item.get("has_text_diff"))
+    ai_required_signals = sum(1 for item in signal_items if is_text_only_ai_candidate(item))
     system_direct_signals = total_signals - ai_required_signals
     if not enable_ai or not llm_enabled:
         emit(
@@ -393,10 +390,9 @@ def run_ai_review(compare_file_path: Path, enable_ai: bool = False, progress_cal
         )
         review = get_signal_level_ai_judgement(item, enable_ai, llm_enabled, stats)
         _stats_increment(stats, item, review)
-        if review.get("ai_reviewed") == "是" or (enable_ai and llm_enabled and not item.get("has_numeric_diff") and item.get("has_text_diff")):
+        if review.get("ai_reviewed") == "是" or (enable_ai and llm_enabled and is_text_only_ai_candidate(item)):
             ai_completed += 1
         completed += 1
-        default_result, default_reason, priority = _default_review_result(review)
         ws.append([
             item["source_sheet"],
             item["signal_40"],
@@ -412,11 +408,6 @@ def run_ai_review(compare_file_path: Path, enable_ai: bool = False, progress_cal
             review["confidence"],
             review["signal_ai_reason"],
             review["signal_ai_suggested_action"],
-            priority,
-            default_result,
-            default_reason,
-            "",
-            "",
         ])
 
     emit(
