@@ -66,8 +66,13 @@ class LarkCliClient:
     def reply_markdown(self, message_id: str, markdown: str) -> bool:
         return self.run_cli("im", "+messages-reply", "--message-id", message_id, "--markdown", markdown, "--as", "bot") is not None
 
-    def send_text(self, user_id: str, text: str) -> str | None:
-        data = self.run_cli("im", "+messages-send", "--user-id", user_id, "--text", text, "--as", "bot", "--format", "json", expect_json=True)
+    def send_text(self, user_id: str | None = None, text: str | None = None, *, chat_id: str | None = None) -> str | None:
+        if not text:
+            raise LarkCliError("缺少飞书消息文本")
+        target_args = _message_target_args(chat_id=chat_id, user_id=user_id)
+        safe_target = "--chat-id" if target_args[0] == "--chat-id" else "--user-id"
+        log.info("send Feishu text via %s", safe_target)
+        data = self.run_cli("im", "+messages-send", *target_args, "--text", text, "--as", "bot", "--format", "json", expect_json=True)
         return _message_id(data)
 
     def send_markdown(self, user_id: str, markdown: str) -> str | None:
@@ -127,23 +132,26 @@ class LarkCliClient:
             return None
         return data.get("file_key") or data.get("file_token") or data.get("data", {}).get("file_key") or data.get("data", {}).get("file_token")
 
-    def send_file(self, user_id: str, file_path: Path) -> str | None:
+    def send_file(self, user_id: str | None = None, file_path: Path | None = None, *, chat_id: str | None = None, timeout: int | None = None) -> str | None:
         """Send a local file to a user.
 
         First attempts a direct ``im +messages-send --file`` style command. If
         this is unsupported in a local lark-cli version, validate and adjust only
         this adapter.
         """
+        if file_path is None:
+            raise FileNotFoundError("缺少待发送文件路径")
         file_path = Path(file_path).resolve()
         if not file_path.is_file():
             raise FileNotFoundError(file_path)
+        target_args = _message_target_args(chat_id=chat_id, user_id=user_id)
         data = self.run_cli(
             "im", "+messages-send",
-            "--user-id", user_id,
+            *target_args,
             "--file", str(file_path),
             "--as", "bot",
             "--format", "json",
-            timeout=120,
+            timeout=timeout or int(os.getenv("FEISHU_FILE_SEND_TIMEOUT_SECONDS", "120")),
             expect_json=True,
         )
         return _message_id(data)
@@ -182,9 +190,11 @@ class FakeLarkCliClient:
         self.replies.append({"message_id": message_id, "markdown": markdown})
         return True
 
-    def send_text(self, user_id: str, text: str) -> str:
+    def send_text(self, user_id: str | None = None, text: str | None = None, *, chat_id: str | None = None) -> str:
         msg = f"fake_msg_{len(self.sent)+1}"
-        self.sent.append({"message_id": msg, "user_id": user_id, "text": text})
+        target_args = _message_target_args(chat_id=chat_id, user_id=user_id)
+        target_key = "chat_id" if target_args[0] == "--chat-id" else "user_id"
+        self.sent.append({"message_id": msg, target_key: target_args[1], "text": text})
         return msg
 
     def send_markdown(self, user_id: str, markdown: str) -> str:
@@ -200,9 +210,11 @@ class FakeLarkCliClient:
         output_path.write_bytes(src.read_bytes())
         return output_path
 
-    def send_file(self, user_id: str, file_path: Path) -> str:
+    def send_file(self, user_id: str | None = None, file_path: Path | None = None, *, chat_id: str | None = None, timeout: int | None = None) -> str:
         msg = f"fake_file_{len(self.sent)+1}"
-        self.sent.append({"message_id": msg, "user_id": user_id, "file": str(file_path)})
+        target_args = _message_target_args(chat_id=chat_id, user_id=user_id)
+        target_key = "chat_id" if target_args[0] == "--chat-id" else "user_id"
+        self.sent.append({"message_id": msg, target_key: target_args[1], "file": str(file_path)})
         return msg
 
     def get_message_detail(self, message_id: str) -> dict[str, Any] | None:
@@ -213,3 +225,17 @@ def _message_id(data: Any) -> str | None:
     if not isinstance(data, dict):
         return None
     return data.get("message_id") or data.get("data", {}).get("message_id")
+
+
+def _message_target_args(*, chat_id: str | None = None, user_id: str | None = None) -> list[str]:
+    chat = str(chat_id or "").strip()
+    user = str(user_id or "").strip()
+    if chat:
+        if not chat.startswith("oc_"):
+            raise LarkCliError("非法 feishu_chat_id：chat_id 必须以 oc_ 开头")
+        return ["--chat-id", chat]
+    if user:
+        if not user.startswith("ou_"):
+            raise LarkCliError("非法 feishu_sender_id：user_id 必须以 ou_ 开头")
+        return ["--user-id", user]
+    raise LarkCliError("缺少有效飞书接收目标：需要 oc_ chat_id 或 ou_ user_id")
