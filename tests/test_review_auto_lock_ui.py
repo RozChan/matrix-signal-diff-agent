@@ -44,6 +44,9 @@ class FakeSt:
     def subheader(self, message: str) -> None:
         self.messages.append(("subheader", message))
 
+    def write(self, message: str) -> None:
+        self.messages.append(("write", message))
+
     def checkbox(self, label: str, **kwargs) -> bool:
         return self.checkbox_value
 

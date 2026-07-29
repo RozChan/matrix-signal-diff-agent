@@ -22,6 +22,7 @@ except Exception:  # noqa: BLE001
 from core import run_all
 from core.ai_review import run_ai_review
 from core.final_export import FINAL_REVIEW_FILENAME, export_final_review_result
+from core.feishu_doc_service import publish_task_result_document, register_final_result_files, retry_failed_attachments, retry_result_notification
 from core.llm_client import get_llm_config, test_llm_connection
 from core.pipeline import OUTPUT_FILENAMES
 from core.result_notifier import build_results_zip
@@ -45,6 +46,7 @@ from core.review_store import (
     heartbeat_review_lock,
     is_signal_level_item,
     ReviewLockError,
+    utc_now_iso,
     update_task_meta,
 )
 
@@ -483,43 +485,36 @@ def _show_admin_review_results(task_dir: Path) -> None:
     else:
         st.info("当前任务尚未生成可查询的审核数据。")
     _show_downloads(task_dir)
+    meta = load_task_meta(task_dir)
+    delivery = dict(meta.get("feishu_delivery") or {})
+    st.subheader("飞书云文档交付")
+    st.write(f"交付状态：{delivery.get('status') or '未开始'}")
+    if delivery.get("document_title"):
+        st.write(f"文档标题：{delivery['document_title']}")
+    if delivery.get("document_url"):
+        st.link_button("打开飞书云文档", delivery["document_url"])
+    attachments = dict(delivery.get("attachments") or {})
+    if attachments:
+        st.dataframe(pd.DataFrame([
+            {"附件": key, "状态": value.get("status", ""), "文件": Path(str(value.get("file_path") or "")).name, "错误": value.get("last_error", "")}
+            for key, value in attachments.items()
+        ]), hide_index=True, use_container_width=True)
+    if delivery.get("last_error"):
+        st.error(f"飞书交付错误：{delivery['last_error']}")
+    failed_attachments = any(value.get("status") == "failed" for value in attachments.values())
+    if failed_attachments and delivery.get("document_id") and st.button("重试失败附件", key=f"retry-feishu-attachments-{task_dir.name}"):
+        result = retry_failed_attachments(task_dir)
+        st.success("失败附件已补传。" if result.get("success") else f"补传失败：{result.get('last_error') or '未知错误'}")
+        st.rerun()
+    if delivery.get("status") == "failed" and not delivery.get("document_id") and st.button("重试创建飞书文档", key=f"retry-feishu-document-{task_dir.name}"):
+        result = publish_task_result_document(task_dir, notify=True)
+        st.success("飞书文档已创建并交付。" if result.get("success") else f"重试失败：{result.get('last_error') or '未知错误'}")
+        st.rerun()
+    notice = dict(delivery.get("result_notification") or {})
+    if delivery.get("status") in {"ready", "delivered"} and notice.get("status") != "sent" and st.button("重新发送最终通知", key=f"retry-feishu-result-notice-{task_dir.name}"):
+        st.success("最终通知已发送。" if retry_result_notification(task_dir) else "最终通知发送失败。")
+        st.rerun()
 
-def _show_admin_page() -> None:
-    st.title("管理员任务管理")
-    if os.getenv("ADMIN_PAGE_ENABLED", "false").lower() != "true":
-        st.error("管理员页面未启用。")
-        return
-    if not st.session_state.get("admin_authenticated"):
-        token = st.text_input("管理员访问Token", type="password")
-        if st.button("登录管理员页面"):
-            if admin_token_valid(token):
-                st.session_state["admin_authenticated"] = True
-                st.rerun()
-            else:
-                st.error("管理员Token错误。")
-        return
-    status = admin_system_status()
-    st.subheader("系统状态")
-    st.json(status)
-    render_admin_history(history_database_path())
-    st.subheader("手动创建全量任务")
-    st.write(f"4.0父页面：{os.getenv('FULL_COMPARE_40_PARENT_URL', '') or '<未配置>'}")
-    st.write(f"5.1父页面：{os.getenv('FULL_COMPARE_51_PARENT_URL', '') or '<未配置>'}")
-    st.write(f"最新版本选择：{os.getenv('CONFLUENCE_PARENT_SELECT_LATEST_VERSION', 'true')}")
-    st.write(f"严格模式：{os.getenv('CONFLUENCE_LATEST_VERSION_STRICT', 'true')}｜通知方式：飞书群自定义机器人")
-    confirm = st.checkbox("确认启动一次4.0与5.1全量信号对比")
-    if "admin_create_operation_id" not in st.session_state:
-        st.session_state["admin_create_operation_id"] = f"admin:{secrets.token_urlsafe(18)}"
-    if st.button("创建自动全量任务", disabled=not confirm):
-        try:
-            result = create_admin_full_compare(st.session_state["admin_create_operation_id"])
-            st.session_state["admin_create_operation_id"] = f"admin:{secrets.token_urlsafe(18)}"
-            st.session_state["admin_selected_task_id"] = result.task_id
-            st.session_state["admin_selector_version"] = int(st.session_state.get("admin_selector_version", 0)) + 1
-            st.success(f"任务已创建：{result.task_id}")
-            st.rerun()
-        except Exception as exc:  # noqa: BLE001
-            st.error(str(exc))
 
 def _show_final_export(task_dir: Path, review_dir: Path, *, session_id: str, can_edit: bool, dirty_count: int = 0, pending_count: int = 0) -> None:
     final_path = _output_dir(task_dir) / FINAL_REVIEW_FILENAME
@@ -563,8 +558,9 @@ def _show_final_export(task_dir: Path, review_dir: Path, *, session_id: str, can
             return
         try:
             stats = export_final_review_result(review_dir / "review_items.json", review_dir / "review_state.json", final_path)
+            registered_files = register_final_result_files(task_dir, final_path)
             meta = load_task_meta(task_dir)
-            updates = {"status": "final_exported", "final_generation_status": "done"}
+            updates = {"status": "final_exported", "final_generation_status": "done", "final_review_stats": stats, "final_result_files": registered_files}
             if meta.get("notify_type") == "feishu_custom_bot":
                 build_results_zip(task_dir)
                 updates["result_delivery_status"] = "web_ready"
@@ -573,7 +569,22 @@ def _show_final_export(task_dir: Path, review_dir: Path, *, session_id: str, can
             update_task_meta(task_dir, **updates)
             if meta.get("notify_type") == "feishu_custom_bot":
                 ensure_result_access(task_dir)
-                notify_result_ready(task_dir)
+                if os.getenv("FEISHU_DOC_DELIVERY_ENABLED", "false").strip().lower() == "true":
+                    try:
+                        with st.spinner("正在创建飞书云文档并插入3个结果附件……"):
+                            delivery = publish_task_result_document(task_dir, notify=True)
+                    except Exception as exc:  # noqa: BLE001 - cloud delivery must not roll back local export
+                        update_task_meta(
+                            task_dir,
+                            feishu_delivery={"status": "failed", "error_type": "unexpected_error", "last_error": str(exc), "updated_at": utc_now_iso()},
+                        )
+                        delivery = {"success": False, "last_error": str(exc)}
+                    if delivery.get("success"):
+                        st.success("飞书云文档和3个结果附件已交付。")
+                    else:
+                        st.warning(f"本地结果已生成，但飞书文档交付失败：{delivery.get('last_error') or delivery.get('error_message') or '未知错误'}")
+                else:
+                    notify_result_ready(task_dir)
             st.success(f"已生成：{final_path}")
             st.dataframe(pd.DataFrame([{"指标": k, "数量": v} for k, v in stats.items()]), hide_index=True, use_container_width=True)
         except Exception as exc:  # noqa: BLE001
@@ -588,6 +599,18 @@ def _show_final_export(task_dir: Path, review_dir: Path, *, session_id: str, can
         st.info(f"最终审核结果文件已存在：{final_path}")
     st.markdown("<div style='height: 1.5rem'></div>", unsafe_allow_html=True)
 
+    review_dir = _review_dir(task_dir)
+    items_path = review_dir / "review_items.json"
+    state_path = review_dir / "review_state.json"
+    st.subheader("审核结果查询")
+    if items_path.exists() and state_path.exists():
+        items = load_review_items(review_dir)
+        state = load_review_state(review_dir)
+        render_system_differences(items)
+        render_review_stats(items, state)
+    else:
+        st.info("当前任务尚未生成可查询的审核数据。")
+    _show_downloads(task_dir)
 
 def _show_result_page(task_id: str, token: str) -> None:
     try:

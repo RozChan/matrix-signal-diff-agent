@@ -899,3 +899,23 @@ python tools/test_confluence_connection.py --test-url "https://yfconfluence.mych
 用户点击“保存所有未保存修改”后，信号值描述/单位的人工结论还会写入跨任务 SQLite 历史库。新任务生成审核状态时，仅在来源、4.0/5.1 信号名、差异字段及两侧字段值均精确匹配时复用历史结论；描述与单位分别匹配，含数值或未解析差异的信号不会进入该复用流程。默认数据库位于 `TASK_ROOT_DIR/review_history.sqlite3`，可通过 `REVIEW_HISTORY_DB` 指定其他持久化路径。
 
 “系统判定真实差异”仍只收录至少含一个数值差异的信号，但每行会展示该信号的全部差异字段及4.0/5.1值，包括伴随的信号值描述和单位差异。
+
+### 飞书云文档结果交付
+
+最终人工审核结果生成后，可通过本机已完成用户授权的 `lark-cli` 自动创建云文档并插入三份结果Excel：
+
+```env
+LARK_CLI_PATH=C:\Users\00557616\AppData\Roaming\npm\node_modules\@larksuite\cli\bin\lark-cli.exe
+FEISHU_RESULT_FOLDER_TOKEN=BsY1fW5ojlVpYddB8hdchZETn2b
+FEISHU_DOC_DELIVERY_ENABLED=true
+FEISHU_DOC_CREATE_TIMEOUT_SECONDS=120
+FEISHU_DOC_UPLOAD_TIMEOUT_SECONDS=180
+```
+
+部署到Windows工作站后，先核对当前CLI版本的真实参数：
+
+```bat
+python -m tools.check_feishu_doc_cli
+```
+
+该功能只调用 `lark-cli --as user`，不会读取或保存用户Token、refresh token、App Secret或CLI授权缓存。

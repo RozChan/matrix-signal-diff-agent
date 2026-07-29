@@ -121,15 +121,22 @@ def notify_review_ready(task_dir: Path, *, enterprise_client: Any | None = None,
     return _custom_once(tdir, "review_ready", "信号差异人工审核已就绪", text, button_text="打开人工审核页面", button_url=str(meta["review_url"]), client=custom_client, force=force)
 
 
-def notify_result_ready(task_dir: Path, *, custom_client: FeishuCustomBotClient | None = None) -> bool:
+def notify_result_ready(task_dir: Path, *, custom_client: FeishuCustomBotClient | None = None, force: bool = False) -> bool:
     tdir = Path(task_dir)
     meta = load_task_meta(tdir)
     if notification_channel(meta) != "feishu_custom_bot" or meta.get("status") not in {"final_exported", "delivered"}:
         return False
+    delivery = dict(meta.get("feishu_delivery") or {})
+    doc_enabled = os.getenv("FEISHU_DOC_DELIVERY_ENABLED", "false").strip().lower() == "true"
+    if doc_enabled and (delivery.get("status") not in {"ready", "delivered"} or not delivery.get("document_url")):
+        return False
     meta = ensure_result_access(tdir)
     files = allowed_result_files(tdir)
-    text = f"任务编号：{meta.get('task_id', tdir.name)}\n审核完成时间：{beijing_time(meta.get('review_completed_at'))}\n最终文件状态：已生成\n结果文件数量：{len(files)}"
-    return _custom_once(tdir, "result_ready", "信号矩阵全量对比最终结果已生成", text, button_text="进入结果下载页", button_url=str(meta.get("result_url") or ""), client=custom_client)
+    document_text = ""
+    if delivery.get("document_url"):
+        document_text = f"\n飞书文档：[{delivery.get('document_title') or '打开飞书云文档'}]({delivery['document_url']})"
+    text = f"任务编号：{meta.get('task_id', tdir.name)}\n完成时间：{beijing_time(meta.get('review_completed_at'))}\n最终文件状态：已生成\n结果文件数量：{len(files)}{document_text}"
+    return _custom_once(tdir, "result_ready", "信号矩阵全量对比最终结果已生成", text, button_text="进入结果下载页", button_url=str(meta.get("result_url") or ""), client=custom_client, force=force)
 
 
 def scan_custom_notifications(custom_client: FeishuCustomBotClient | None = None) -> None:
@@ -143,4 +150,9 @@ def scan_custom_notifications(custom_client: FeishuCustomBotClient | None = None
         elif meta.get("status") == "awaiting_review":
             notify_review_ready(tdir, custom_client=custom_client)
         elif meta.get("status") in {"final_exported", "delivered"}:
-            notify_result_ready(tdir, custom_client=custom_client)
+            if os.getenv("FEISHU_DOC_DELIVERY_ENABLED", "false").strip().lower() == "true" and meta.get("status") == "final_exported":
+                from .feishu_doc_service import publish_task_result_document
+
+                publish_task_result_document(tdir, notify=True)
+            else:
+                notify_result_ready(tdir, custom_client=custom_client)

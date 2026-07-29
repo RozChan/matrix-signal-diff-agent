@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.admin_tasks import admin_token_valid, retry_admin_review_notification, safe_task_dir
 from core.feishu_custom_bot import FeishuCustomBotClient, generate_signature
-from core.notification_router import notify_result_ready, notify_review_ready, notify_task_failed, notify_task_started
+from core.notification_router import notify_result_ready, notify_review_ready, notify_task_failed, notify_task_started, scan_custom_notifications
 from core.result_access import allowed_result_files, ensure_result_access, resolve_allowed_result_file, result_token_valid
 from core.review_store import create_task_meta, load_task_meta, update_task_meta
 
@@ -154,6 +154,19 @@ def test_notification_failure_is_recorded_without_failing_task(tmp_path: Path) -
     assert meta["status"] == "created"
     assert meta["custom_bot_started_status"] == "failed"
     assert "webhook unavailable" in meta["custom_bot_started_last_error"]
+
+
+def test_custom_notification_scan_resumes_document_delivery(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("TASK_ROOT_DIR", str(tmp_path))
+    monkeypatch.setenv("FEISHU_DOC_DELIVERY_ENABLED", "true")
+    tdir = task(tmp_path)
+    update_task_meta(tdir, status="final_exported")
+    calls = []
+    monkeypatch.setattr("core.feishu_doc_service.publish_task_result_document", lambda task_dir, notify=True: calls.append((task_dir, notify)) or {"success": True})
+
+    scan_custom_notifications(FakeCustomClient())
+
+    assert calls == [(tdir, True)]
 
 
 def test_enterprise_task_does_not_use_custom_bot(tmp_path: Path) -> None:
