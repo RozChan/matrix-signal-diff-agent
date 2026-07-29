@@ -456,7 +456,6 @@ def _show_review_workspace() -> None:
     items = load_review_items(review_dir)
     if items and not all(is_signal_level_item(item) for item in items):
         st.warning("当前任务使用旧版字段级审核数据，建议重新运行任务生成信号级审核数据。")
-        _show_downloads(task_dir)
         return
     state = init_review_state(review_dir, task_id, items)
     if not items:
@@ -467,10 +466,60 @@ def _show_review_workspace() -> None:
     state, dirty_count = render_compact_review(task_dir, review_dir, task_id, items, state, can_edit=can_edit, session_id=session_id, display_text=_display_text)
     pending_count = pending_review_count(state)
     _show_final_export(task_dir, review_dir, session_id=session_id, can_edit=can_edit, dirty_count=dirty_count, pending_count=pending_count)
-    render_system_differences(items)
-    render_review_stats(items, state)
+
+
+def _show_admin_review_results(task_dir: Path) -> None:
+    """Expose detailed review diagnostics only inside the authenticated admin page."""
+
+    review_dir = _review_dir(task_dir)
+    items_path = review_dir / "review_items.json"
+    state_path = review_dir / "review_state.json"
+    st.subheader("审核结果查询")
+    if items_path.exists() and state_path.exists():
+        items = load_review_items(review_dir)
+        state = load_review_state(review_dir)
+        render_system_differences(items)
+        render_review_stats(items, state)
+    else:
+        st.info("当前任务尚未生成可查询的审核数据。")
     _show_downloads(task_dir)
 
+def _show_admin_page() -> None:
+    st.title("管理员任务管理")
+    if os.getenv("ADMIN_PAGE_ENABLED", "false").lower() != "true":
+        st.error("管理员页面未启用。")
+        return
+    if not st.session_state.get("admin_authenticated"):
+        token = st.text_input("管理员访问Token", type="password")
+        if st.button("登录管理员页面"):
+            if admin_token_valid(token):
+                st.session_state["admin_authenticated"] = True
+                st.rerun()
+            else:
+                st.error("管理员Token错误。")
+        return
+    status = admin_system_status()
+    st.subheader("系统状态")
+    st.json(status)
+    render_admin_history(history_database_path())
+    st.subheader("手动创建全量任务")
+    st.write(f"4.0父页面：{os.getenv('FULL_COMPARE_40_PARENT_URL', '') or '<未配置>'}")
+    st.write(f"5.1父页面：{os.getenv('FULL_COMPARE_51_PARENT_URL', '') or '<未配置>'}")
+    st.write(f"最新版本选择：{os.getenv('CONFLUENCE_PARENT_SELECT_LATEST_VERSION', 'true')}")
+    st.write(f"严格模式：{os.getenv('CONFLUENCE_LATEST_VERSION_STRICT', 'true')}｜通知方式：飞书群自定义机器人")
+    confirm = st.checkbox("确认启动一次4.0与5.1全量信号对比")
+    if "admin_create_operation_id" not in st.session_state:
+        st.session_state["admin_create_operation_id"] = f"admin:{secrets.token_urlsafe(18)}"
+    if st.button("创建自动全量任务", disabled=not confirm):
+        try:
+            result = create_admin_full_compare(st.session_state["admin_create_operation_id"])
+            st.session_state["admin_create_operation_id"] = f"admin:{secrets.token_urlsafe(18)}"
+            st.session_state["admin_selected_task_id"] = result.task_id
+            st.session_state["admin_selector_version"] = int(st.session_state.get("admin_selector_version", 0)) + 1
+            st.success(f"任务已创建：{result.task_id}")
+            st.rerun()
+        except Exception as exc:  # noqa: BLE001
+            st.error(str(exc))
 
 def _show_final_export(task_dir: Path, review_dir: Path, *, session_id: str, can_edit: bool, dirty_count: int = 0, pending_count: int = 0) -> None:
     final_path = _output_dir(task_dir) / FINAL_REVIEW_FILENAME
@@ -662,6 +711,7 @@ def _show_admin_page() -> None:
                     st.error(str(exc))
         if row.get("result_url"):
             st.link_button("进入结果下载页", row["result_url"])
+        _show_admin_review_results(safe_task_dir(selected))
 
 
 def main() -> None:

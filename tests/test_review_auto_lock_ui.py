@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -39,6 +40,9 @@ class FakeSt:
 
     def error(self, message: str) -> None:
         self.messages.append(("error", message))
+
+    def subheader(self, message: str) -> None:
+        self.messages.append(("subheader", message))
 
     def checkbox(self, label: str, **kwargs) -> bool:
         return self.checkbox_value
@@ -161,3 +165,20 @@ def test_not_ready_or_completed_task_does_not_auto_acquire(tmp_path: Path, monke
     monkeypatch.setattr(app, "st", done_st)
     assert app._show_review_lock_panel(ready, "done", {"revision": 0})[0] is False
     assert any("已完成审核" in message for _, message in done_st.messages)
+
+
+def test_detailed_review_results_are_rendered_by_admin_helper(tmp_path: Path, monkeypatch) -> None:
+    tdir = _task(tmp_path)
+    review_dir = tdir / "review"
+    (review_dir / "review_items.json").write_text(json.dumps([{"item_id": "a", "field_diffs": []}]), encoding="utf-8")
+    fake = FakeSt()
+    calls: list[str] = []
+    monkeypatch.setattr(app, "st", fake)
+    monkeypatch.setattr(app, "render_system_differences", lambda items: calls.append("system"))
+    monkeypatch.setattr(app, "render_review_stats", lambda items, state: calls.append("stats"))
+    monkeypatch.setattr(app, "_show_downloads", lambda task_dir: calls.append("downloads"))
+
+    app._show_admin_review_results(tdir)
+
+    assert calls == ["system", "stats", "downloads"]
+    assert ("subheader", "审核结果查询") in fake.messages
