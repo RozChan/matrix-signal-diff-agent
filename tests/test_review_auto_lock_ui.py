@@ -73,7 +73,7 @@ def test_valid_review_link_auto_acquires_lock_without_start_button(tmp_path: Pat
     assert can_edit is True
     assert meta["review_session_id"] == session_id
     assert not any(label == "开始审核" for label in fake.buttons)
-    assert any("已自动进入审核模式" in message for _, message in fake.messages)
+    assert fake.messages == []
 
 
 def test_same_session_rerun_does_not_reacquire_lock(tmp_path: Path, monkeypatch) -> None:
@@ -124,22 +124,22 @@ def test_expired_lock_is_auto_acquired_but_active_lock_is_not(tmp_path: Path, mo
     fake = FakeSt()
     monkeypatch.setattr(app, "st", fake)
     assert app._show_review_lock_panel(tdir, "task", {"revision": 0})[0] is True
-    assert any("原审核锁已过期" in message for _, message in fake.messages)
+    assert fake.messages == []
 
     second = FakeSt()
     monkeypatch.setattr(app, "st", second)
     assert app._show_review_lock_panel(tdir, "task", {"revision": 0})[0] is False
 
 
-def test_takeover_requires_confirmation_and_records_sessions(tmp_path: Path, monkeypatch) -> None:
+def test_takeover_button_records_previous_and_new_sessions(tmp_path: Path, monkeypatch) -> None:
     tdir = _task(tmp_path)
     acquire_review_lock(tdir, "old", owner="alice")
-    no_confirm = FakeSt(checkbox_value=False, button_value=True)
+    no_confirm = FakeSt(button_value=False)
     monkeypatch.setattr(app, "st", no_confirm)
     assert app._show_review_lock_panel(tdir, "task", {"revision": 0})[0] is False
     assert load_task_meta(tdir)["review_session_id"] == "old"
 
-    confirmed = FakeSt(checkbox_value=True, button_value=True)
+    confirmed = FakeSt(button_value=True)
     monkeypatch.setattr(app, "st", confirmed)
     app._show_review_lock_panel(tdir, "task", {"revision": 0})
     meta = load_task_meta(tdir)

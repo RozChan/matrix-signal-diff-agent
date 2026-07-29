@@ -120,6 +120,7 @@ def test_review_notice_mentions_configured_reviewer_and_uses_pending_count(tmp_p
     assert "<at id=ou_reviewer>审核人</at>" in markdown
     assert "待人工确认：2项" in markdown
     assert "历史人工复用：3项" in markdown
+    assert "历史版本跳过" not in markdown
     assert "99" not in markdown
 
 

@@ -13,7 +13,7 @@ if importlib.util.find_spec("st_aggrid") is not None:
 else:  # pragma: no cover - rendered as an actionable deployment error
     AgGrid = DataReturnMode = GridOptionsBuilder = JsCode = None
 
-from core.review_store import ReviewConflictError, ReviewLockError, compute_review_stats, load_review_state, update_task_meta
+from core.review_store import ReviewConflictError, ReviewLockError, compute_review_stats, load_review_items, load_review_state, update_task_meta
 from core.review_table import PENDING_REVIEW_LABEL, apply_editor_changes, field_rows, result_display, save_dirty_reviews
 from core.task_progress import beijing_time
 
@@ -83,11 +83,11 @@ def system_difference_rows(items: list[dict[str, Any]]) -> list[dict[str, str]]:
 
 def render_system_differences(items: list[dict[str, Any]]) -> None:
     rows = system_difference_rows(items)
-    st.subheader(f"系统判定真实差异（含数值差异的信号，共{len(rows)}条）")
-    if not rows:
-        st.info("本任务没有包含数值差异的信号。")
-        return
-    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch", height=min(600, 38 * (len(rows) + 1) + 8))
+    with st.expander(f"系统判定真实差异（含数值差异的信号，共{len(rows)}条）", expanded=False):
+        if not rows:
+            st.info("本任务没有包含数值差异的信号。")
+            return
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch", height=min(600, 38 * (len(rows) + 1) + 8))
 
 
 def chinese_review_stats(stats: dict[str, Any]) -> dict[str, Any]:
@@ -227,17 +227,17 @@ def _render_detail(item: dict[str, Any], field_key: str, review: dict[str, Any],
             )
 
 
-def _render_field_table(field_name: str, task_id: str, items: list[dict[str, Any]], state: dict[str, Any], can_edit: bool, drafts_key: str, dirty_key: str, detail_key: str, version_key: str) -> None:
+def _render_field_table(field_name: str, task_id: str, items: list[dict[str, Any]], state: dict[str, Any], can_edit: bool, drafts_key: str, dirty_key: str, detail_key: str, version_key: str) -> bool:
     state_items = state.get("items", {})
     drafts = st.session_state.setdefault(drafts_key, {})
     rows = field_rows(items, state_items, field_name, drafts)
     if not rows:
         st.info(f"本任务没有{field_name}差异。")
-        return
+        return False
 
     if AgGrid is None:
         st.error("审核表格组件未安装，请执行 pip install -r requirements.txt 后重新启动 Streamlit。")
-        return
+        return False
 
     grid_rows = [{**row, "详情": ""} for row in rows]
     frame = pd.DataFrame(grid_rows)
@@ -260,7 +260,35 @@ def _render_field_table(field_name: str, task_id: str, items: list[dict[str, Any
     chosen = selected_grid_row_id(response.get("selected_rows") if hasattr(response, "get") else None)
     if chosen:
         st.session_state[detail_key] = chosen
-    st.caption(f"共{len(rows)}条｜可直接使用表头排序和筛选｜点击最右侧详情复选框查看完整内容")
+    _, save_column = st.columns([8, 1])
+    return save_column.button(
+        "保存修改",
+        disabled=not can_edit or not st.session_state[dirty_key],
+        key=f"save-{field_name}-{task_id}",
+        type="primary",
+        use_container_width=True,
+    )
+
+
+def _save_review_changes(task_dir, review_dir, task_id: str, state: dict[str, Any], session_id: str, drafts_key: str, dirty_key: str) -> dict[str, Any]:
+    dirty = set(st.session_state.setdefault(dirty_key, []))
+    state = save_dirty_reviews(
+        review_dir,
+        task_id,
+        st.session_state[drafts_key],
+        dirty,
+        base_revision=int(state.get("revision") or 0),
+        session_id=session_id,
+    )
+    st.session_state[dirty_key] = []
+    saved_stats = compute_review_stats(load_review_items(review_dir), state)
+    update_task_meta(
+        task_dir,
+        status="reviewing",
+        history_reused_count=int(saved_stats.get("history_reused") or 0),
+        pending_manual_count=int(saved_stats.get("pending_manual") or 0),
+    )
+    return state
 
 
 def render_compact_review(task_dir, review_dir, task_id: str, items: list[dict[str, Any]], state: dict[str, Any], *, can_edit: bool, session_id: str, display_text: Callable[[Any], str]) -> tuple[dict[str, Any], int]:
@@ -283,23 +311,15 @@ def render_compact_review(task_dir, review_dir, task_id: str, items: list[dict[s
         st.success("所有需要人工确认的描述值和单位均已完成。")
     for field_name in table_order:
         st.subheader("信号值描述判断" if field_name == "信号值描述" else "单位判断")
-        _render_field_table(field_name, task_id, items, state, can_edit, drafts_key, dirty_key, detail_key, version_key)
-
-    dirty = set(st.session_state.setdefault(dirty_key, []))
-    if st.button("保存所有未保存修改", disabled=not can_edit or not dirty, key=f"save-fields-{task_id}", type="primary"):
-        try:
-            state = save_dirty_reviews(review_dir, task_id, st.session_state[drafts_key], dirty, base_revision=int(state.get("revision") or 0), session_id=session_id)
-            st.session_state[dirty_key] = []
-            saved_stats = compute_review_stats(items, state)
-            update_task_meta(
-                task_dir, status="reviewing",
-                history_reused_count=int(saved_stats.get("history_reused") or 0),
-                pending_manual_count=int(saved_stats.get("pending_manual") or 0),
-            )
-            st.success("人工确认结果已保存。")
-            st.rerun()
-        except (ReviewConflictError, ReviewLockError) as exc:
-            st.error(str(exc))
+        save_clicked = _render_field_table(field_name, task_id, items, state, can_edit, drafts_key, dirty_key, detail_key, version_key)
+        if save_clicked:
+            try:
+                state = _save_review_changes(task_dir, review_dir, task_id, state, session_id, drafts_key, dirty_key)
+            except (ReviewConflictError, ReviewLockError) as exc:
+                st.error(str(exc))
+            else:
+                st.success("人工确认结果已保存。")
+                st.rerun()
 
     selected = str(st.session_state.get(detail_key) or "")
     if "::" in selected:

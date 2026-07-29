@@ -114,7 +114,7 @@ def notify_review_ready(task_dir: Path, *, enterprise_client: Any | None = None,
     text = (
         (f"{mention}\n" if mention else "")
         + f"任务编号：{meta.get('task_id', tdir.name)}\n4.0输入Excel：{int(meta.get('input_40_count') or 0)}个\n"
-        f"5.1输入Excel：{int(meta.get('input_51_count') or 0)}个\n历史版本跳过：{int(meta.get('full_compare_skipped_history_count') or 0)}个\n"
+        f"5.1输入Excel：{int(meta.get('input_51_count') or 0)}个\n"
         f"待人工确认：{pending_count}项\n历史人工复用：{int(meta.get('history_reused_count') or 0)}项\n"
         f"生成时间：{beijing_time(meta.get('updated_at') or meta.get('created_at'))}"
     )
