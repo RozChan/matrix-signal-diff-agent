@@ -1,5 +1,5 @@
 streamlit
-streamlit-aggrid==1.1.9
+./vendor/wheels/streamlit_aggrid-1.1.9+manual.1-py3-none-any.whl
 openpyxl
 pandas
 requests

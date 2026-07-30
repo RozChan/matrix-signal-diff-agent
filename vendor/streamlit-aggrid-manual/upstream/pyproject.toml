@@ -1,0 +1,48 @@
+[project]
+name = "streamlit-aggrid"
+version = "1.1.9"
+description = "Streamlit component implementation of ag-grid"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Pablo Fonseca", email = "pablo.fonseca+pip@gmail.com" }]
+keywords = ["streamlit", "ag-grid", "component"]
+dependencies = ["streamlit >=1.2", "pandas >=1.4.0", "python-decouple"]
+
+[project.urls]
+homepage = "https://github.com/PablocFonseca/streamlit-aggrid"
+
+[tool.poetry]
+packages = [{ include = "st_aggrid/**/*.py" }]
+
+#exclude = [{ path = "st_aggrid/frontend/**/*" }]
+include = [
+    { path = "st_aggrid/frontend/build/**/*", format = [
+        "sdist",
+        "wheel",
+    ] },
+    { path = "st_aggrid/json/**/*.json", format = [
+        "sdist",
+        "wheel",
+    ] },
+
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+[tool.poetry.group.dev.dependencies]
+bs4 = "^0.0.2"
+playwright = "^1.51.0"
+pytest = "^8.3.5"
+pytest-playwright = "^0.7.0"
+watchdog = "^6.0.0"
+ruff = "*"
+streamlit-code-editor = "^0.1.12"
+pytest-cov = "^6.2.1"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"

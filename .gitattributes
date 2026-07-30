@@ -1,0 +1,2 @@
+vendor/streamlit-aggrid-manual/upstream/** -text
+vendor/wheels/*.whl binary
