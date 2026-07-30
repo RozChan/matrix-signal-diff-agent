@@ -297,6 +297,7 @@ def test_cancel_command_marks_task_cancelled_and_terminates_worker(tmp_path: Pat
 
     process = FakeProcess()
     bot_service._WORKER_PROCESSES[result.task_id] = process
+    monkeypatch.setattr(bot_service, "_find_worker_pids", lambda task_id: [])
     monkeypatch.setattr(bot_service, "sync_task_progress_card", lambda *args, **kwargs: True)
     client = _ReplyClient()
     bot_service.handle_event(
