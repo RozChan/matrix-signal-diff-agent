@@ -42,7 +42,6 @@ from core.review_store import (
     generate_review_items_from_excel,
     init_review_state,
     load_review_items,
-    load_review_state,
     load_task_meta,
     heartbeat_review_lock,
     is_signal_level_item,
@@ -600,6 +599,18 @@ def _show_final_export(task_dir: Path, review_dir: Path, *, session_id: str, can
         st.info(f"最终审核结果文件已存在：{final_path}")
     st.markdown("<div style='height: 1.5rem'></div>", unsafe_allow_html=True)
 
+    review_dir = _review_dir(task_dir)
+    items_path = review_dir / "review_items.json"
+    state_path = review_dir / "review_state.json"
+    st.subheader("审核结果查询")
+    if items_path.exists() and state_path.exists():
+        items = load_review_items(review_dir)
+        state = load_review_state(review_dir)
+        render_system_differences(items)
+        render_review_stats(items, state)
+    else:
+        st.info("当前任务尚未生成可查询的审核数据。")
+    _show_downloads(task_dir)
 
 def _show_result_page(task_id: str, token: str) -> None:
     try:
