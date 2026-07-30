@@ -130,6 +130,20 @@ def capture_grid_changes(
     return dirty_ids
 
 
+def capture_grid_response(
+    response: Any,
+    source_rows: list[dict[str, Any]],
+    state_items: dict[str, Any],
+    drafts: dict[str, dict[str, Any]],
+    dirty_ids: set[str],
+) -> set[str]:
+    """Capture edited rows from both normal and callback AgGrid responses."""
+
+    returned = response.get("data") if hasattr(response, "get") else None
+    returned_rows = returned.to_dict("records") if isinstance(returned, pd.DataFrame) else (returned or [])
+    return capture_grid_changes(returned_rows, source_rows, state_items, drafts, dirty_ids)
+
+
 def selected_grid_row_id(selected_rows: Any) -> str:
     if selected_rows is None:
         return ""
@@ -276,6 +290,16 @@ def _render_field_table(field_name: str, task_id: str, items: list[dict[str, Any
 
     grid_rows = [{**row, "详情": ""} for row in rows]
     frame = pd.DataFrame(grid_rows)
+    st.session_state.setdefault(dirty_key, [])
+
+    def persist_grid_event(updated_response: Any) -> None:
+        """Persist browser edits before Streamlit starts the event rerun."""
+
+        current_dirty = set(st.session_state.get(dirty_key, []))
+        st.session_state[dirty_key] = sorted(
+            capture_grid_response(updated_response, grid_rows, state_items, drafts, current_dirty)
+        )
+
     response = AgGrid(
         frame,
         gridOptions=_grid_options(frame, field_name, can_edit),
@@ -287,11 +311,10 @@ def _render_field_table(field_name: str, task_id: str, items: list[dict[str, Any
         height=min(720, (84 if field_name == "信号值描述" else 42) * (min(len(rows), 20) + 1) + 48),
         theme="streamlit",
         key=aggrid_key(field_name, task_id, can_edit),
+        callback=persist_grid_event,
     )
-    returned = response.get("data") if hasattr(response, "get") else None
-    returned_rows = returned.to_dict("records") if isinstance(returned, pd.DataFrame) else (returned or [])
     dirty = set(st.session_state.setdefault(dirty_key, []))
-    st.session_state[dirty_key] = sorted(capture_grid_changes(returned_rows, grid_rows, state_items, drafts, dirty))
+    st.session_state[dirty_key] = sorted(capture_grid_response(response, grid_rows, state_items, drafts, dirty))
     chosen = selected_grid_row_id(response.get("selected_rows") if hasattr(response, "get") else None)
     field_detail_key = field_detail_state_key(detail_key, field_name)
     if chosen:

@@ -22,7 +22,7 @@ except Exception:  # noqa: BLE001
 from core import run_all
 from core.ai_review import run_ai_review
 from core.final_export import FINAL_REVIEW_FILENAME, export_final_review_result
-from core.feishu_doc_service import publish_task_result_document, register_final_result_files, retry_failed_attachments, retry_result_notification
+from core.feishu_doc_service import publish_task_result_document, register_final_result_files
 from core.llm_client import get_llm_config, test_llm_connection
 from core.pipeline import OUTPUT_FILENAMES
 from core.result_notifier import build_results_zip
@@ -34,6 +34,7 @@ from core.review_table import pending_review_count
 from core.review_history import history_database_path
 from ui.admin_progress import render_live_task_progress
 from ui.admin_history import render_admin_history
+from ui.admin_review_results import render_admin_review_results
 from ui.review_table import render_compact_review
 from core.review_store import (
     acquire_review_lock,
@@ -469,69 +470,6 @@ def _show_review_workspace() -> None:
     pending_count = pending_review_count(state)
     _show_final_export(task_dir, review_dir, session_id=session_id, can_edit=can_edit, dirty_count=dirty_count, pending_count=pending_count)
 
-    review_dir = _review_dir(task_dir)
-    items_path = review_dir / "review_items.json"
-    state_path = review_dir / "review_state.json"
-    st.subheader("审核结果查询")
-    if items_path.exists() and state_path.exists():
-        items = load_review_items(review_dir)
-        state = load_review_state(review_dir)
-        render_system_differences(items)
-        render_review_stats(items, state)
-    else:
-        st.info("当前任务尚未生成可查询的审核数据。")
-    _show_downloads(task_dir)
-
-def _show_admin_review_results(task_dir: Path) -> None:
-    """Expose detailed review diagnostics only inside the authenticated admin page."""
-
-    # Keep these imports inside the administrator-only branch.  The reviewer
-    # workspace must never render or even initialize result-query components.
-    from core.review_store import load_review_state
-    from ui.review_table import render_review_stats, render_system_differences
-
-    review_dir = _review_dir(task_dir)
-    items_path = review_dir / "review_items.json"
-    state_path = review_dir / "review_state.json"
-    st.subheader("审核结果查询")
-    if items_path.exists() and state_path.exists():
-        items = load_review_items(review_dir)
-        state = load_review_state(review_dir)
-        render_system_differences(items)
-        render_review_stats(items, state)
-    else:
-        st.info("当前任务尚未生成可查询的审核数据。")
-    _show_downloads(task_dir)
-    meta = load_task_meta(task_dir)
-    delivery = dict(meta.get("feishu_delivery") or {})
-    st.subheader("飞书云文档交付")
-    st.write(f"交付状态：{delivery.get('status') or '未开始'}")
-    if delivery.get("document_title"):
-        st.write(f"文档标题：{delivery['document_title']}")
-    if delivery.get("document_url"):
-        st.link_button("打开飞书云文档", delivery["document_url"])
-    attachments = dict(delivery.get("attachments") or {})
-    if attachments:
-        st.dataframe(pd.DataFrame([
-            {"附件": key, "状态": value.get("status", ""), "文件": Path(str(value.get("file_path") or "")).name, "错误": value.get("last_error", "")}
-            for key, value in attachments.items()
-        ]), hide_index=True, use_container_width=True)
-    if delivery.get("last_error"):
-        st.error(f"飞书交付错误：{delivery['last_error']}")
-    failed_attachments = any(value.get("status") == "failed" for value in attachments.values())
-    if failed_attachments and delivery.get("document_id") and st.button("重试失败附件", key=f"retry-feishu-attachments-{task_dir.name}"):
-        result = retry_failed_attachments(task_dir)
-        st.success("失败附件已补传。" if result.get("success") else f"补传失败：{result.get('last_error') or '未知错误'}")
-        st.rerun()
-    if delivery.get("status") == "failed" and not delivery.get("document_id") and st.button("重试创建飞书文档", key=f"retry-feishu-document-{task_dir.name}"):
-        result = publish_task_result_document(task_dir, notify=True)
-        st.success("飞书文档已创建并交付。" if result.get("success") else f"重试失败：{result.get('last_error') or '未知错误'}")
-        st.rerun()
-    notice = dict(delivery.get("result_notification") or {})
-    if delivery.get("status") in {"ready", "delivered"} and notice.get("status") != "sent" and st.button("重新发送最终通知", key=f"retry-feishu-result-notice-{task_dir.name}"):
-        st.success("最终通知已发送。" if retry_result_notification(task_dir) else "最终通知发送失败。")
-        st.rerun()
-
 
 def _show_final_export(task_dir: Path, review_dir: Path, *, session_id: str, can_edit: bool, dirty_count: int = 0, pending_count: int = 0) -> None:
     final_path = _output_dir(task_dir) / FINAL_REVIEW_FILENAME
@@ -739,7 +677,7 @@ def _show_admin_page() -> None:
                     st.error(str(exc))
         if row.get("result_url"):
             st.link_button("进入结果下载页", row["result_url"])
-        _show_admin_review_results(safe_task_dir(selected))
+        render_admin_review_results(safe_task_dir(selected), _show_downloads)
 
 
 def main() -> None:
