@@ -162,14 +162,16 @@ def field_detail_state_key(detail_key: str, field_name: str) -> str:
     return f"{detail_key}-{field_name}"
 
 
-def save_button_disabled(can_edit: bool) -> bool:
-    """Only the review lock controls whether a table can be saved.
+def field_dirty_state_key(dirty_key: str, field_name: str) -> str:
+    """Keep unsaved description and unit rows independent."""
 
-    Browser-side AG Grid edits arrive on the same rerun as a save-button click,
-    so the previous render's dirty count must not disable the button.
-    """
+    return f"{dirty_key}-{field_name}"
 
-    return not can_edit
+
+def save_button_disabled(can_edit: bool, has_changes: bool) -> bool:
+    """Enable save only while this table owns real unsaved browser edits."""
+
+    return (not can_edit) or (not has_changes)
 
 
 def grid_column_layout(field_name: str) -> dict[str, dict[str, Any]]:
@@ -290,13 +292,14 @@ def _render_field_table(field_name: str, task_id: str, items: list[dict[str, Any
 
     grid_rows = [{**row, "详情": ""} for row in rows]
     frame = pd.DataFrame(grid_rows)
-    st.session_state.setdefault(dirty_key, [])
+    field_dirty_key = field_dirty_state_key(dirty_key, field_name)
+    st.session_state.setdefault(field_dirty_key, [])
 
     def persist_grid_event(updated_response: Any) -> None:
         """Persist browser edits before Streamlit starts the event rerun."""
 
-        current_dirty = set(st.session_state.get(dirty_key, []))
-        st.session_state[dirty_key] = sorted(
+        current_dirty = set(st.session_state.get(field_dirty_key, []))
+        st.session_state[field_dirty_key] = sorted(
             capture_grid_response(updated_response, grid_rows, state_items, drafts, current_dirty)
         )
 
@@ -313,8 +316,8 @@ def _render_field_table(field_name: str, task_id: str, items: list[dict[str, Any
         key=aggrid_key(field_name, task_id, can_edit),
         callback=persist_grid_event,
     )
-    dirty = set(st.session_state.setdefault(dirty_key, []))
-    st.session_state[dirty_key] = sorted(capture_grid_response(response, grid_rows, state_items, drafts, dirty))
+    dirty = set(st.session_state.setdefault(field_dirty_key, []))
+    st.session_state[field_dirty_key] = sorted(capture_grid_response(response, grid_rows, state_items, drafts, dirty))
     chosen = selected_grid_row_id(response.get("selected_rows") if hasattr(response, "get") else None)
     field_detail_key = field_detail_state_key(detail_key, field_name)
     if chosen:
@@ -322,10 +325,7 @@ def _render_field_table(field_name: str, task_id: str, items: list[dict[str, Any
     _, save_column = st.columns([8, 1])
     save_clicked = save_column.button(
         "保存修改",
-        # Keep the control clickable in edit mode.  AG Grid sends its latest
-        # cell values during the button-triggered rerun, so disabling from the
-        # previous Python render can incorrectly strand visible browser edits.
-        disabled=save_button_disabled(can_edit),
+        disabled=save_button_disabled(can_edit, bool(st.session_state[field_dirty_key])),
         key=f"save-{field_name}-{task_id}",
         type="primary",
         use_container_width=True,
@@ -383,12 +383,14 @@ def render_compact_review(task_dir, review_dir, task_id: str, items: list[dict[s
         st.subheader("信号值描述判断" if field_name == "信号值描述" else "单位判断")
         save_clicked = _render_field_table(field_name, task_id, items, state, can_edit, drafts_key, dirty_key, detail_key, version_key, display_text)
         if save_clicked:
+            field_dirty_key = field_dirty_state_key(dirty_key, field_name)
             try:
-                state = _save_review_changes(task_dir, review_dir, task_id, state, session_id, drafts_key, dirty_key)
+                state = _save_review_changes(task_dir, review_dir, task_id, state, session_id, drafts_key, field_dirty_key)
             except (ReviewConflictError, ReviewLockError) as exc:
                 st.error(str(exc))
             else:
                 st.success("人工确认结果已保存。")
                 st.rerun()
 
-    return load_review_state(review_dir), len(st.session_state.get(dirty_key, []))
+    dirty_count = sum(len(st.session_state.get(field_dirty_state_key(dirty_key, field_name), [])) for field_name in table_order)
+    return load_review_state(review_dir), dirty_count
