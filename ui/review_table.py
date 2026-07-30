@@ -148,6 +148,16 @@ def field_detail_state_key(detail_key: str, field_name: str) -> str:
     return f"{detail_key}-{field_name}"
 
 
+def save_button_disabled(can_edit: bool) -> bool:
+    """Only the review lock controls whether a table can be saved.
+
+    Browser-side AG Grid edits arrive on the same rerun as a save-button click,
+    so the previous render's dirty count must not disable the button.
+    """
+
+    return not can_edit
+
+
 def grid_column_layout(field_name: str) -> dict[str, dict[str, Any]]:
     """Return bounded responsive widths so every business column fits onscreen."""
 
@@ -289,7 +299,10 @@ def _render_field_table(field_name: str, task_id: str, items: list[dict[str, Any
     _, save_column = st.columns([8, 1])
     save_clicked = save_column.button(
         "保存修改",
-        disabled=not can_edit or not st.session_state[dirty_key],
+        # Keep the control clickable in edit mode.  AG Grid sends its latest
+        # cell values during the button-triggered rerun, so disabling from the
+        # previous Python render can incorrectly strand visible browser edits.
+        disabled=save_button_disabled(can_edit),
         key=f"save-{field_name}-{task_id}",
         type="primary",
         use_container_width=True,

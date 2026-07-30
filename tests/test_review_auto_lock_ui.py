@@ -8,6 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import app
+import ui.review_table as review_table_ui
 from core.review_store import acquire_review_lock, begin_final_generation, create_task_meta, init_review_state, load_task_meta, update_task_meta
 
 
@@ -177,8 +178,8 @@ def test_detailed_review_results_are_rendered_by_admin_helper(tmp_path: Path, mo
     fake = FakeSt()
     calls: list[str] = []
     monkeypatch.setattr(app, "st", fake)
-    monkeypatch.setattr(app, "render_system_differences", lambda items: calls.append("system"))
-    monkeypatch.setattr(app, "render_review_stats", lambda items, state: calls.append("stats"))
+    monkeypatch.setattr(review_table_ui, "render_system_differences", lambda items: calls.append("system"))
+    monkeypatch.setattr(review_table_ui, "render_review_stats", lambda items, state: calls.append("stats"))
     monkeypatch.setattr(app, "_show_downloads", lambda task_dir: calls.append("downloads"))
 
     app._show_admin_review_results(tdir)

@@ -34,7 +34,7 @@ from core.review_table import pending_review_count
 from core.review_history import history_database_path
 from ui.admin_progress import render_live_task_progress
 from ui.admin_history import render_admin_history
-from ui.review_table import render_compact_review, render_review_stats, render_system_differences
+from ui.review_table import render_compact_review
 from core.review_store import (
     acquire_review_lock,
     begin_final_generation,
@@ -469,9 +469,26 @@ def _show_review_workspace() -> None:
     pending_count = pending_review_count(state)
     _show_final_export(task_dir, review_dir, session_id=session_id, can_edit=can_edit, dirty_count=dirty_count, pending_count=pending_count)
 
+    review_dir = _review_dir(task_dir)
+    items_path = review_dir / "review_items.json"
+    state_path = review_dir / "review_state.json"
+    st.subheader("审核结果查询")
+    if items_path.exists() and state_path.exists():
+        items = load_review_items(review_dir)
+        state = load_review_state(review_dir)
+        render_system_differences(items)
+        render_review_stats(items, state)
+    else:
+        st.info("当前任务尚未生成可查询的审核数据。")
+    _show_downloads(task_dir)
 
 def _show_admin_review_results(task_dir: Path) -> None:
     """Expose detailed review diagnostics only inside the authenticated admin page."""
+
+    # Keep these imports inside the administrator-only branch.  The reviewer
+    # workspace must never render or even initialize result-query components.
+    from core.review_store import load_review_state
+    from ui.review_table import render_review_stats, render_system_differences
 
     review_dir = _review_dir(task_dir)
     items_path = review_dir / "review_items.json"
@@ -599,18 +616,6 @@ def _show_final_export(task_dir: Path, review_dir: Path, *, session_id: str, can
         st.info(f"最终审核结果文件已存在：{final_path}")
     st.markdown("<div style='height: 1.5rem'></div>", unsafe_allow_html=True)
 
-    review_dir = _review_dir(task_dir)
-    items_path = review_dir / "review_items.json"
-    state_path = review_dir / "review_state.json"
-    st.subheader("审核结果查询")
-    if items_path.exists() and state_path.exists():
-        items = load_review_items(review_dir)
-        state = load_review_state(review_dir)
-        render_system_differences(items)
-        render_review_stats(items, state)
-    else:
-        st.info("当前任务尚未生成可查询的审核数据。")
-    _show_downloads(task_dir)
 
 def _show_result_page(task_id: str, token: str) -> None:
     try:

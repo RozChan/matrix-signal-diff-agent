@@ -11,7 +11,7 @@ from core.confluence_task_store import add_sources, update_source
 from core.review_store import acquire_review_lock, compute_review_stats, create_task_meta, init_review_state, update_task_meta
 from core.review_table import PENDING_REVIEW_LABEL, apply_editor_changes, field_rows, format_multiline_enum_value, pending_review_count, result_display, save_dirty_reviews
 from core.task_progress import ACTIVE_STATUSES, allowed_admin_actions, beijing_time, build_task_progress, choose_default_task, overall_percent
-from ui.review_table import aggrid_key, capture_grid_changes, chinese_review_stats, description_cell_options, field_detail_state_key, grid_column_layout, initialize_review_session, review_phase, review_table_order, selected_grid_row_id, system_difference_rows
+from ui.review_table import aggrid_key, capture_grid_changes, chinese_review_stats, description_cell_options, field_detail_state_key, grid_column_layout, initialize_review_session, review_phase, review_table_order, save_button_disabled, selected_grid_row_id, system_difference_rows
 
 
 def make_task(tmp_path: Path, task_id: str = "task1") -> Path:
@@ -169,6 +169,11 @@ def test_description_pair_uses_native_shared_auto_height_without_dom_renderer() 
     assert options["autoHeight"] is True
     assert options["cellStyle"]["whiteSpace"] == "pre-line"
     assert "cellRenderer" not in options
+
+
+def test_save_button_is_not_gated_by_previous_render_dirty_state() -> None:
+    assert save_button_disabled(True) is False
+    assert save_button_disabled(False) is True
 
 
 def test_aggrid_changes_follow_row_id_after_frontend_sorting() -> None:
