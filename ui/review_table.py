@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from typing import Any, Callable
 
 import pandas as pd
@@ -36,7 +37,7 @@ def aggrid_key(field_name: str, task_id: str, can_edit: bool = True) -> str:
     # Increment the suffix only when the grid schema changes. This resets stale
     # browser-side column widths once while remaining stable across normal edits.
     mode = "edit" if can_edit else "view"
-    return f"review-aggrid-v6-{mode}-{field_name}-{task_id}"
+    return f"review-aggrid-v7-{mode}-{field_name}-{task_id}"
 
 
 def review_phase(items: list[dict[str, Any]], state_items: dict[str, Any]) -> tuple[str, int, int]:
@@ -162,6 +163,57 @@ def grid_column_layout(field_name: str) -> dict[str, dict[str, Any]]:
     }
 
 
+def synced_description_renderer_code(side: str) -> str:
+    """Render paired description cells with one scrollbar on the 5.1 side.
+
+    Both content areas receive the larger measured content height, so the right
+    scrollbar has enough range even when the 4.0 description is longer.
+    """
+
+    if side not in {"left", "right"}:
+        raise ValueError("side must be left or right")
+    left_column = json.dumps("EEA4.0信号值描述", ensure_ascii=False)
+    right_column = json.dumps("EEA5.1信号值描述", ensure_ascii=False)
+    overflow = "hidden" if side == "left" else "auto"
+    return f"""
+    function(params) {{
+        const scroller = document.createElement('div');
+        scroller.className = 'paired-description-scroll paired-description-{side}';
+        scroller.style.cssText = 'width:100%;height:72px;overflow-x:hidden;overflow-y:{overflow};white-space:pre-line;line-height:20px;box-sizing:border-box;';
+        const content = document.createElement('div');
+        content.className = 'paired-description-content';
+        content.textContent = params.value == null ? '' : String(params.value);
+        scroller.appendChild(content);
+
+        const alignPair = function() {{
+            const row = scroller.closest('.ag-row');
+            if (!row) return;
+            const left = row.querySelector('[col-id=' + {left_column!r} + '] .paired-description-scroll');
+            const right = row.querySelector('[col-id=' + {right_column!r} + '] .paired-description-scroll');
+            if (!left || !right) return;
+            const leftContent = left.querySelector('.paired-description-content');
+            const rightContent = right.querySelector('.paired-description-content');
+            leftContent.style.minHeight = '0px';
+            rightContent.style.minHeight = '0px';
+            const sharedHeight = Math.max(leftContent.scrollHeight, rightContent.scrollHeight);
+            leftContent.style.minHeight = sharedHeight + 'px';
+            rightContent.style.minHeight = sharedHeight + 'px';
+            left.scrollTop = right.scrollTop;
+        }};
+        if ({str(side == 'right').lower()}) {{
+            scroller.addEventListener('scroll', function() {{
+                const row = scroller.closest('.ag-row');
+                if (!row) return;
+                const left = row.querySelector('[col-id=' + {left_column!r} + '] .paired-description-scroll');
+                if (left) left.scrollTop = scroller.scrollTop;
+            }});
+        }}
+        requestAnimationFrame(function() {{ requestAnimationFrame(alignPair); }});
+        return scroller;
+    }}
+    """
+
+
 def _grid_options(frame: pd.DataFrame, field_name: str, can_edit: bool) -> dict[str, Any]:
     builder = GridOptionsBuilder.from_dataframe(frame)
     builder.configure_default_column(sortable=True, filter=True, resizable=True, suppressHeaderMenuButton=False)
@@ -174,16 +226,15 @@ def _grid_options(frame: pd.DataFrame, field_name: str, can_edit: bool) -> dict[
     )
     builder.configure_column("EEA4.0信号名", **layout["EEA4.0信号名"])
     builder.configure_column("EEA5.1信号名", **layout["EEA5.1信号名"])
-    for value_column in (f"EEA4.0{field_name}", f"EEA5.1{field_name}"):
+    for index, value_column in enumerate((f"EEA4.0{field_name}", f"EEA5.1{field_name}")):
         value_style = {
-            "whiteSpace": "pre-line",
-            "lineHeight": "20px",
-            "maxHeight": "72px",
-            "overflowY": "auto",
+            "display": "flex",
+            "alignItems": "center",
+            "overflow": "hidden",
         } if field_name == "信号值描述" else None
         builder.configure_column(
             value_column, tooltipField=value_column,
-            wrapText=field_name == "信号值描述",
+            cellRenderer=JsCode(synced_description_renderer_code("left" if index == 0 else "right")) if field_name == "信号值描述" else None,
             cellStyle=value_style,
             **layout[value_column],
         )

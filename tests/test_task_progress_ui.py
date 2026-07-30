@@ -11,7 +11,7 @@ from core.confluence_task_store import add_sources, update_source
 from core.review_store import acquire_review_lock, compute_review_stats, create_task_meta, init_review_state, update_task_meta
 from core.review_table import PENDING_REVIEW_LABEL, apply_editor_changes, field_rows, format_multiline_enum_value, pending_review_count, result_display, save_dirty_reviews
 from core.task_progress import ACTIVE_STATUSES, allowed_admin_actions, beijing_time, build_task_progress, choose_default_task, overall_percent
-from ui.review_table import aggrid_key, capture_grid_changes, chinese_review_stats, field_detail_state_key, grid_column_layout, initialize_review_session, review_phase, review_table_order, selected_grid_row_id, system_difference_rows
+from ui.review_table import aggrid_key, capture_grid_changes, chinese_review_stats, field_detail_state_key, grid_column_layout, initialize_review_session, review_phase, review_table_order, selected_grid_row_id, synced_description_renderer_code, system_difference_rows
 
 
 def make_task(tmp_path: Path, task_id: str = "task1") -> Path:
@@ -161,6 +161,16 @@ def test_aggrid_column_layout_bounds_long_values_and_keeps_actions_compact() -> 
     assert layout["EEA4.0信号名"]["maxWidth"] == 175
     assert layout["人工确认"]["maxWidth"] == 180
     assert layout["详情"]["maxWidth"] == 64
+
+
+def test_description_pair_uses_only_right_scrollbar_and_syncs_left_content() -> None:
+    left = synced_description_renderer_code("left")
+    right = synced_description_renderer_code("right")
+    assert "overflow-y:hidden" in left
+    assert "overflow-y:auto" in right
+    assert "left.scrollTop = scroller.scrollTop" in right
+    assert "Math.max(leftContent.scrollHeight, rightContent.scrollHeight)" in left
+    assert "EEA4.0信号值描述" in right and "EEA5.1信号值描述" in right
 
 
 def test_aggrid_changes_follow_row_id_after_frontend_sorting() -> None:
