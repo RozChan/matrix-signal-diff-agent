@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import importlib.util
-import json
 from typing import Any, Callable
 
 import pandas as pd
@@ -37,7 +36,7 @@ def aggrid_key(field_name: str, task_id: str, can_edit: bool = True) -> str:
     # Increment the suffix only when the grid schema changes. This resets stale
     # browser-side column widths once while remaining stable across normal edits.
     mode = "edit" if can_edit else "view"
-    return f"review-aggrid-v7-{mode}-{field_name}-{task_id}"
+    return f"review-aggrid-v8-{mode}-{field_name}-{task_id}"
 
 
 def review_phase(items: list[dict[str, Any]], state_items: dict[str, Any]) -> tuple[str, int, int]:
@@ -163,55 +162,25 @@ def grid_column_layout(field_name: str) -> dict[str, dict[str, Any]]:
     }
 
 
-def synced_description_renderer_code(side: str) -> str:
-    """Render paired description cells with one scrollbar on the 5.1 side.
+def description_cell_options() -> dict[str, Any]:
+    """Use AG Grid's native row sizing for paired multiline descriptions.
 
-    Both content areas receive the larger measured content height, so the right
-    scrollbar has enough range even when the 4.0 description is longer.
+    AG Grid calculates one shared row height from the tallest auto-height cell,
+    so unequal 4.0/5.1 descriptions remain aligned without two independent
+    scrollbars.  Native text rendering also avoids returning DOM objects through
+    streamlit-aggrid's React bridge.
     """
 
-    if side not in {"left", "right"}:
-        raise ValueError("side must be left or right")
-    left_column = json.dumps("EEA4.0信号值描述", ensure_ascii=False)
-    right_column = json.dumps("EEA5.1信号值描述", ensure_ascii=False)
-    overflow = "hidden" if side == "left" else "auto"
-    return f"""
-    function(params) {{
-        const scroller = document.createElement('div');
-        scroller.className = 'paired-description-scroll paired-description-{side}';
-        scroller.style.cssText = 'width:100%;height:72px;overflow-x:hidden;overflow-y:{overflow};white-space:pre-line;line-height:20px;box-sizing:border-box;';
-        const content = document.createElement('div');
-        content.className = 'paired-description-content';
-        content.textContent = params.value == null ? '' : String(params.value);
-        scroller.appendChild(content);
-
-        const alignPair = function() {{
-            const row = scroller.closest('.ag-row');
-            if (!row) return;
-            const left = row.querySelector('[col-id=' + {left_column!r} + '] .paired-description-scroll');
-            const right = row.querySelector('[col-id=' + {right_column!r} + '] .paired-description-scroll');
-            if (!left || !right) return;
-            const leftContent = left.querySelector('.paired-description-content');
-            const rightContent = right.querySelector('.paired-description-content');
-            leftContent.style.minHeight = '0px';
-            rightContent.style.minHeight = '0px';
-            const sharedHeight = Math.max(leftContent.scrollHeight, rightContent.scrollHeight);
-            leftContent.style.minHeight = sharedHeight + 'px';
-            rightContent.style.minHeight = sharedHeight + 'px';
-            left.scrollTop = right.scrollTop;
-        }};
-        if ({str(side == 'right').lower()}) {{
-            scroller.addEventListener('scroll', function() {{
-                const row = scroller.closest('.ag-row');
-                if (!row) return;
-                const left = row.querySelector('[col-id=' + {left_column!r} + '] .paired-description-scroll');
-                if (left) left.scrollTop = scroller.scrollTop;
-            }});
-        }}
-        requestAnimationFrame(function() {{ requestAnimationFrame(alignPair); }});
-        return scroller;
-    }}
-    """
+    return {
+        "wrapText": True,
+        "autoHeight": True,
+        "cellStyle": {
+            "whiteSpace": "pre-line",
+            "lineHeight": "20px",
+            "paddingTop": "6px",
+            "paddingBottom": "6px",
+        },
+    }
 
 
 def _grid_options(frame: pd.DataFrame, field_name: str, can_edit: bool) -> dict[str, Any]:
@@ -226,16 +195,11 @@ def _grid_options(frame: pd.DataFrame, field_name: str, can_edit: bool) -> dict[
     )
     builder.configure_column("EEA4.0信号名", **layout["EEA4.0信号名"])
     builder.configure_column("EEA5.1信号名", **layout["EEA5.1信号名"])
-    for index, value_column in enumerate((f"EEA4.0{field_name}", f"EEA5.1{field_name}")):
-        value_style = {
-            "display": "flex",
-            "alignItems": "center",
-            "overflow": "hidden",
-        } if field_name == "信号值描述" else None
+    for value_column in (f"EEA4.0{field_name}", f"EEA5.1{field_name}"):
+        description_options = description_cell_options() if field_name == "信号值描述" else {}
         builder.configure_column(
             value_column, tooltipField=value_column,
-            cellRenderer=JsCode(synced_description_renderer_code("left" if index == 0 else "right")) if field_name == "信号值描述" else None,
-            cellStyle=value_style,
+            **description_options,
             **layout[value_column],
         )
     builder.configure_column("AI判断结果", **layout["AI判断结果"])
@@ -248,16 +212,20 @@ def _grid_options(frame: pd.DataFrame, field_name: str, can_edit: bool) -> dict[
     )
     builder.configure_selection(selection_mode="single", use_checkbox=False)
     builder.configure_pagination(paginationAutoPageSize=False, paginationPageSize=20)
+    grid_options = {
+        "getRowId": JsCode("function(params) { return params.data.row_id; }"),
+        "suppressRowClickSelection": True,
+        "rowSelection": "single",
+        "singleClickEdit": True,
+        "suppressClickEdit": False,
+        "paginationPageSizeSelector": [10, 20, 50, 100],
+        "animateRows": False,
+        "tooltipShowDelay": 300,
+    }
+    if field_name != "信号值描述":
+        grid_options["rowHeight"] = 42
     builder.configure_grid_options(
-        getRowId=JsCode("function(params) { return params.data.row_id; }"),
-        suppressRowClickSelection=True,
-        rowSelection="single",
-        singleClickEdit=True,
-        suppressClickEdit=False,
-        paginationPageSizeSelector=[10, 20, 50, 100],
-        animateRows=False,
-        tooltipShowDelay=300,
-        rowHeight=84 if field_name == "信号值描述" else 42,
+        **grid_options,
     )
     return builder.build()
 
