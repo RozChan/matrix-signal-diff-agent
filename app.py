@@ -469,6 +469,18 @@ def _show_review_workspace() -> None:
     pending_count = pending_review_count(state)
     _show_final_export(task_dir, review_dir, session_id=session_id, can_edit=can_edit, dirty_count=dirty_count, pending_count=pending_count)
 
+    review_dir = _review_dir(task_dir)
+    items_path = review_dir / "review_items.json"
+    state_path = review_dir / "review_state.json"
+    st.subheader("审核结果查询")
+    if items_path.exists() and state_path.exists():
+        items = load_review_items(review_dir)
+        state = load_review_state(review_dir)
+        render_system_differences(items)
+        render_review_stats(items, state)
+    else:
+        st.info("当前任务尚未生成可查询的审核数据。")
+    _show_downloads(task_dir)
 
 def _show_admin_review_results(task_dir: Path) -> None:
     """Expose detailed review diagnostics only inside the authenticated admin page."""
