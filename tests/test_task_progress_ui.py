@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 import sys
+from types import SimpleNamespace
 
 import pytest
 import pandas as pd
@@ -9,10 +11,11 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.confluence_task_store import add_sources, update_source
-from core.review_store import acquire_review_lock, compute_review_stats, create_task_meta, init_review_state, update_task_meta
-from core.review_table import PENDING_REVIEW_LABEL, apply_editor_changes, field_rows, format_multiline_enum_value, pending_review_count, result_display, save_dirty_reviews
+from core.review_store import acquire_review_lock, compute_review_stats, create_task_meta, init_review_state, load_task_meta, update_task_meta
+from core.review_table import PENDING_REVIEW_LABEL, apply_editor_changes, field_rows, format_multiline_enum_value, pending_review_count, result_display, result_value, save_dirty_reviews
 from core.task_progress import ACTIVE_STATUSES, allowed_admin_actions, beijing_time, build_task_progress, choose_default_task, overall_percent
-from ui.review_table import aggrid_key, capture_grid_changes, capture_grid_response, chinese_review_stats, description_cell_options, field_detail_state_key, field_dirty_state_key, grid_column_layout, initialize_review_session, review_phase, review_table_order, save_button_disabled, selected_grid_row_id, system_difference_rows
+from ui.review_table import ReviewGridSyncError, aggrid_key, capture_grid_changes, capture_grid_response, chinese_review_stats, description_cell_options, field_detail_state_key, field_dirty_state_key, field_drafts_state_key, grid_column_layout, initialize_review_session, review_phase, review_table_order, save_button_disabled, selected_grid_row_id, system_difference_rows
+import ui.review_table as review_table_ui
 
 
 def make_task(tmp_path: Path, task_id: str = "task1") -> Path:
@@ -92,6 +95,11 @@ def test_review_labels_are_concise_and_field_specific() -> None:
     assert result_display("信号值描述", "different") == "🟢 描述值不同"
     assert result_display("单位", "same") == "🟢 单位相同"
     assert result_display("单位", "different") == "🟢 单位不同"
+    assert result_value("🟢 描述值相同") == "same"
+    assert result_value("🟢 描述值不同") == "different"
+    assert result_value("🟢 单位相同") == "same"
+    assert result_value("🟢 单位不同") == "different"
+    assert result_value(PENDING_REVIEW_LABEL) == ""
 
 
 def test_enum_values_are_displayed_one_per_line_without_changing_content() -> None:
@@ -150,7 +158,7 @@ def test_binary_editor_drafts_only_mark_changed_fields() -> None:
     assert drafts["a::信号值描述"]["result"] == "same"
 
 
-def test_aggrid_key_is_stable_across_review_edits() -> None:
+def test_editor_key_is_stable_and_separate_for_both_fields() -> None:
     assert aggrid_key("信号值描述", "task", True) == aggrid_key("信号值描述", "task", True)
     assert aggrid_key("信号值描述", "task", True) != aggrid_key("信号值描述", "task", False)
 
@@ -177,9 +185,10 @@ def test_save_button_is_not_gated_by_previous_render_dirty_state() -> None:
     assert save_button_disabled(True, False) is True
     assert save_button_disabled(False, True) is True
     assert field_dirty_state_key("dirty-task", "信号值描述") != field_dirty_state_key("dirty-task", "单位")
+    assert field_drafts_state_key("draft-task", "信号值描述") != field_drafts_state_key("draft-task", "单位")
 
 
-def test_aggrid_callback_persists_browser_edit_before_save_rerun() -> None:
+def test_editor_response_persists_value_change_before_save_rerun() -> None:
     source = [{"row_id": "a::单位", "item_id": "a", "field_key": "单位", "人工确认": PENDING_REVIEW_LABEL}]
     response = {"data": pd.DataFrame([{**source[0], "人工确认": result_display("单位", "same")}])}
     drafts: dict[str, dict] = {}
@@ -191,7 +200,21 @@ def test_aggrid_callback_persists_browser_edit_before_save_rerun() -> None:
     assert drafts["a::单位"]["result"] == "same"
 
 
-def test_aggrid_changes_follow_row_id_after_frontend_sorting() -> None:
+def test_editor_change_back_to_saved_value_clears_dirty_row() -> None:
+    source = [{"row_id": "a::单位", "item_id": "a", "field_key": "单位", "人工确认": result_display("单位", "different")}]
+    state_items = {"a": {"field_reviews": {"单位": {"result": "same"}}}}
+    drafts = {"a::单位": {"item_id": "a", "field_key": "单位", "result": "different"}}
+    returned = [{**source[0], "人工确认": result_display("单位", "same")}]
+    assert capture_grid_changes(returned, source, state_items, drafts, {"a::单位"}) == set()
+    assert drafts["a::单位"]["result"] == "same"
+
+
+def test_editor_response_without_row_id_fails_loudly() -> None:
+    with pytest.raises(ReviewGridSyncError, match="缺少row_id"):
+        capture_grid_changes([{"人工确认": result_display("单位", "same")}], [], {}, {}, set())
+
+
+def test_editor_changes_follow_row_id_after_frontend_sorting() -> None:
     source = [
         {"row_id": "b::信号值描述", "item_id": "b", "field_key": "信号值描述", "人工确认": PENDING_REVIEW_LABEL},
         {"row_id": "a::信号值描述", "item_id": "a", "field_key": "信号值描述", "人工确认": PENDING_REVIEW_LABEL},
@@ -229,6 +252,48 @@ def test_dirty_batch_save_preserves_lock_and_revision(tmp_path: Path) -> None:
     assert saved["items"]["a"]["field_reviews"]["信号值描述"]["result"] == "same"
     with pytest.raises(Exception):
         save_dirty_reviews(review_dir, "task", drafts, {"a::信号值描述"}, base_revision=state["revision"], session_id="session-1")
+
+
+def test_ui_save_updates_json_revision_reviewed_and_pending_count(tmp_path: Path, monkeypatch) -> None:
+    tdir = make_task(tmp_path, "task-ui-save")
+    review_dir = tdir / "review"
+    items = [review_item("a", with_unit=True)]
+    state = init_review_state(review_dir, "task-ui-save", items)
+    (review_dir / "review_items.json").write_text(json.dumps(items, ensure_ascii=False), encoding="utf-8")
+    acquire_review_lock(tdir, "session-1")
+    drafts_key = field_drafts_state_key("review-drafts-task-ui-save", "单位")
+    dirty_key = field_dirty_state_key("review-dirty-task-ui-save", "单位")
+    session_state = {
+        drafts_key: {"a::单位": {"item_id": "a", "field_key": "单位", "result": "different"}},
+        dirty_key: ["a::单位"],
+    }
+    monkeypatch.setattr(review_table_ui, "st", SimpleNamespace(session_state=session_state))
+
+    saved = review_table_ui._save_review_changes(
+        tdir, review_dir, "task-ui-save", state, "session-1", drafts_key, dirty_key,
+    )
+
+    unit = saved["items"]["a"]["field_reviews"]["单位"]
+    assert unit["result"] == "different" and unit["reviewed"] is True
+    assert unit["reviewer"] == "session-1" and unit["reviewed_at"]
+    assert saved["revision"] == state["revision"] + 1
+    assert pending_review_count(saved) == 1
+    assert session_state[dirty_key] == []
+    assert load_task_meta(tdir)["pending_manual_count"] == 1
+
+
+def test_ui_save_failure_preserves_current_table_drafts_and_dirty_rows(tmp_path: Path, monkeypatch) -> None:
+    drafts_key, dirty_key = "drafts-unit", "dirty-unit"
+    session_state = {
+        drafts_key: {"a::单位": {"item_id": "a", "field_key": "单位", "result": "same"}},
+        dirty_key: ["a::单位"],
+    }
+    monkeypatch.setattr(review_table_ui, "st", SimpleNamespace(session_state=session_state))
+    monkeypatch.setattr(review_table_ui, "save_dirty_reviews", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("write failed")))
+    with pytest.raises(RuntimeError, match="write failed"):
+        review_table_ui._save_review_changes(tmp_path, tmp_path / "review", "task", {}, "session", drafts_key, dirty_key)
+    assert session_state[dirty_key] == ["a::单位"]
+    assert session_state[drafts_key]["a::单位"]["result"] == "same"
 
 
 def test_chinese_stats_use_binary_labels() -> None:

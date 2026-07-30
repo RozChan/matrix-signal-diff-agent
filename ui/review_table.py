@@ -2,16 +2,11 @@
 
 from __future__ import annotations
 
-import importlib.util
+import os
 from typing import Any, Callable
 
 import pandas as pd
 import streamlit as st
-
-if importlib.util.find_spec("st_aggrid") is not None:
-    from st_aggrid import AgGrid, DataReturnMode, GridOptionsBuilder, JsCode
-else:  # pragma: no cover - rendered as an actionable deployment error
-    AgGrid = DataReturnMode = GridOptionsBuilder = JsCode = None
 
 from core.review_store import ReviewConflictError, ReviewLockError, compute_review_stats, load_review_items, load_review_state, update_task_meta
 from core.review_table import PENDING_REVIEW_LABEL, apply_editor_changes, field_rows, result_display, save_dirty_reviews
@@ -30,13 +25,23 @@ def initialize_review_session(session_state: Any, task_id: str) -> tuple[str, st
     return drafts_key, dirty_key, detail_key, version_key, drafts
 
 
-def aggrid_key(field_name: str, task_id: str, can_edit: bool = True) -> str:
-    """Keep stable but separate grid identities for editor and read-only views."""
+class ReviewGridSyncError(ValueError):
+    """Raised when editable rows cannot be mapped to stable review identities."""
+
+
+def editor_key(field_name: str, task_id: str, can_edit: bool = True) -> str:
+    """Keep stable, independent identities for both native review editors."""
 
     # Increment the suffix only when the grid schema changes. This resets stale
     # browser-side column widths once while remaining stable across normal edits.
     mode = "edit" if can_edit else "view"
-    return f"review-aggrid-v8-{mode}-{field_name}-{task_id}"
+    return f"review-data-editor-v1-{mode}-{field_name}-{task_id}"
+
+
+def aggrid_key(field_name: str, task_id: str, can_edit: bool = True) -> str:
+    """Backward-compatible alias for tests and old session cleanup tooling."""
+
+    return editor_key(field_name, task_id, can_edit)
 
 
 def review_phase(items: list[dict[str, Any]], state_items: dict[str, Any]) -> tuple[str, int, int]:
@@ -113,9 +118,12 @@ def capture_grid_changes(
     drafts: dict[str, dict[str, Any]],
     dirty_ids: set[str],
 ) -> set[str]:
-    """Merge AG Grid's sorted/filtered response by stable row_id, never by row position."""
+    """Merge editor rows by stable row_id, never by visible row position."""
 
     source_by_id = {str(row.get("row_id") or ""): row for row in source_rows}
+    missing_ids = [index for index, row in enumerate(returned_rows) if not str(row.get("row_id") or "")]
+    if missing_ids:
+        raise ReviewGridSyncError(f"人工确认表返回数据缺少row_id，行索引：{missing_ids[:10]}")
     changed: list[dict[str, Any]] = []
     touched: set[str] = set()
     for returned in returned_rows:
@@ -137,7 +145,7 @@ def capture_grid_response(
     drafts: dict[str, dict[str, Any]],
     dirty_ids: set[str],
 ) -> set[str]:
-    """Capture edited rows from both normal and callback AgGrid responses."""
+    """Capture edited rows from a mapping/DataFrame response."""
 
     returned = response.get("data") if hasattr(response, "get") else None
     returned_rows = returned.to_dict("records") if isinstance(returned, pd.DataFrame) else (returned or [])
@@ -168,6 +176,12 @@ def field_dirty_state_key(dirty_key: str, field_name: str) -> str:
     return f"{dirty_key}-{field_name}"
 
 
+def field_drafts_state_key(drafts_key: str, field_name: str) -> str:
+    """Keep description and unit draft dictionaries fully independent."""
+
+    return f"{drafts_key}-{field_name}"
+
+
 def save_button_disabled(can_edit: bool, has_changes: bool) -> bool:
     """Enable save only while this table owns real unsaved browser edits."""
 
@@ -189,17 +203,10 @@ def grid_column_layout(field_name: str) -> dict[str, dict[str, Any]]:
 
 
 def description_cell_options() -> dict[str, Any]:
-    """Use AG Grid's native row sizing for paired multiline descriptions.
-
-    AG Grid calculates one shared row height from the tallest auto-height cell,
-    so unequal 4.0/5.1 descriptions remain aligned without two independent
-    scrollbars.  Native text rendering also avoids returning DOM objects through
-    streamlit-aggrid's React bridge.
-    """
+    """Document native multiline display settings used by the review editor."""
 
     return {
-        "wrapText": True,
-        "autoHeight": True,
+        "wrapText": True, "autoHeight": True,
         "cellStyle": {
             "whiteSpace": "pre-line",
             "lineHeight": "20px",
@@ -209,51 +216,8 @@ def description_cell_options() -> dict[str, Any]:
     }
 
 
-def _grid_options(frame: pd.DataFrame, field_name: str, can_edit: bool) -> dict[str, Any]:
-    builder = GridOptionsBuilder.from_dataframe(frame)
-    builder.configure_default_column(sortable=True, filter=True, resizable=True, suppressHeaderMenuButton=False)
-    for hidden in ("row_id", "item_id", "field_key", "序号"):
-        builder.configure_column(hidden, hide=True)
-    layout = grid_column_layout(field_name)
-    builder.configure_column(
-        "详情", header_name="详情", checkboxSelection=True, pinned="right",
-        sortable=False, filter=False, **layout["详情"],
-    )
-    builder.configure_column("EEA4.0信号名", **layout["EEA4.0信号名"])
-    builder.configure_column("EEA5.1信号名", **layout["EEA5.1信号名"])
-    for value_column in (f"EEA4.0{field_name}", f"EEA5.1{field_name}"):
-        description_options = description_cell_options() if field_name == "信号值描述" else {}
-        builder.configure_column(
-            value_column, tooltipField=value_column,
-            **description_options,
-            **layout[value_column],
-        )
-    builder.configure_column("AI判断结果", **layout["AI判断结果"])
-    builder.configure_column(
-        "人工确认", pinned="right", editable=bool(can_edit),
-        cellEditor="agSelectCellEditor",
-        cellEditorParams={"values": [PENDING_REVIEW_LABEL, result_display(field_name, "same"), result_display(field_name, "different")]},
-        cellStyle={"backgroundColor": "#fff7ed"} if can_edit else {},
-        **layout["人工确认"],
-    )
-    builder.configure_selection(selection_mode="single", use_checkbox=False)
-    builder.configure_pagination(paginationAutoPageSize=False, paginationPageSize=20)
-    grid_options = {
-        "getRowId": JsCode("function(params) { return params.data.row_id; }"),
-        "suppressRowClickSelection": True,
-        "rowSelection": "single",
-        "singleClickEdit": True,
-        "suppressClickEdit": False,
-        "paginationPageSizeSelector": [10, 20, 50, 100],
-        "animateRows": False,
-        "tooltipShowDelay": 300,
-    }
-    if field_name != "信号值描述":
-        grid_options["rowHeight"] = 42
-    builder.configure_grid_options(
-        **grid_options,
-    )
-    return builder.build()
+def review_grid_debug_enabled() -> bool:
+    return os.getenv("REVIEW_GRID_DEBUG", "false").strip().lower() == "true"
 
 
 def _render_detail(item: dict[str, Any], field_key: str, review: dict[str, Any], display_text: Callable[[Any], str]) -> None:
@@ -280,48 +244,80 @@ def _render_detail(item: dict[str, Any], field_key: str, review: dict[str, Any],
 
 def _render_field_table(field_name: str, task_id: str, items: list[dict[str, Any]], state: dict[str, Any], can_edit: bool, drafts_key: str, dirty_key: str, detail_key: str, version_key: str, display_text: Callable[[Any], str]) -> bool:
     state_items = state.get("items", {})
-    drafts = st.session_state.setdefault(drafts_key, {})
+    field_drafts_key = field_drafts_state_key(drafts_key, field_name)
+    drafts = st.session_state.setdefault(field_drafts_key, {})
     rows = field_rows(items, state_items, field_name, drafts)
     if not rows:
         st.info(f"本任务没有{field_name}差异。")
         return False
 
-    if AgGrid is None:
-        st.error("审核表格组件未安装，请执行 pip install -r requirements.txt 后重新启动 Streamlit。")
-        return False
-
-    grid_rows = [{**row, "详情": ""} for row in rows]
+    grid_rows = [{**row, "详情": False} for row in rows]
     frame = pd.DataFrame(grid_rows)
     field_dirty_key = field_dirty_state_key(dirty_key, field_name)
     st.session_state.setdefault(field_dirty_key, [])
-
-    def persist_grid_event(updated_response: Any) -> None:
-        """Persist browser edits before Streamlit starts the event rerun."""
-
-        current_dirty = set(st.session_state.get(field_dirty_key, []))
-        st.session_state[field_dirty_key] = sorted(
-            capture_grid_response(updated_response, grid_rows, state_items, drafts, current_dirty)
-        )
-
-    response = AgGrid(
+    component_key = editor_key(field_name, task_id, can_edit)
+    hidden_columns = {"row_id": None, "item_id": None, "field_key": None, "序号": None}
+    column_config = {
+        **hidden_columns,
+        "人工确认": st.column_config.SelectboxColumn(
+            "人工确认",
+            options=[PENDING_REVIEW_LABEL, result_display(field_name, "same"), result_display(field_name, "different")],
+            required=True,
+            width="medium",
+        ),
+        "详情": st.column_config.CheckboxColumn("详情", width="small"),
+        f"EEA4.0{field_name}": st.column_config.TextColumn(f"EEA4.0{field_name}", width="large"),
+        f"EEA5.1{field_name}": st.column_config.TextColumn(f"EEA5.1{field_name}", width="large"),
+    }
+    editable_columns = {"人工确认", "详情"} if can_edit else {"详情"}
+    disabled_columns = [column for column in frame.columns if column not in editable_columns]
+    edited_frame = st.data_editor(
         frame,
-        gridOptions=_grid_options(frame, field_name, can_edit),
-        data_return_mode=DataReturnMode.FILTERED_AND_SORTED,
-        update_on=["cellValueChanged", "selectionChanged"],
-        allow_unsafe_jscode=True,
-        fit_columns_on_grid_load=True,
-        reload_data=False,
-        height=min(720, (84 if field_name == "信号值描述" else 42) * (min(len(rows), 20) + 1) + 48),
-        theme="streamlit",
-        key=aggrid_key(field_name, task_id, can_edit),
-        callback=persist_grid_event,
+        column_config=column_config,
+        disabled=disabled_columns,
+        hide_index=True,
+        num_rows="fixed",
+        width="stretch",
+        height=min(720, (96 if field_name == "信号值描述" else 42) * min(len(rows), 20) + 42),
+        key=component_key,
     )
     dirty = set(st.session_state.setdefault(field_dirty_key, []))
-    st.session_state[field_dirty_key] = sorted(capture_grid_response(response, grid_rows, state_items, drafts, dirty))
-    chosen = selected_grid_row_id(response.get("selected_rows") if hasattr(response, "get") else None)
+    returned_rows = edited_frame.to_dict("records")
+    st.session_state[field_dirty_key] = sorted(capture_grid_changes(returned_rows, grid_rows, state_items, drafts, dirty))
+    chosen = next((str(row.get("row_id") or "") for row in returned_rows if bool(row.get("详情"))), "")
     field_detail_key = field_detail_state_key(detail_key, field_name)
     if chosen:
         st.session_state[field_detail_key] = chosen
+    elif any(bool(row.get("详情")) for row in returned_rows) is False:
+        st.session_state[field_detail_key] = ""
+
+    if review_grid_debug_enabled():
+        changed_rows = []
+        source_by_id = {str(row["row_id"]): row for row in grid_rows}
+        for returned in returned_rows:
+            source = source_by_id.get(str(returned.get("row_id") or ""), {})
+            if returned.get("人工确认") != source.get("人工确认"):
+                changed_rows.append({
+                    "row_id": returned.get("row_id"),
+                    "旧值": source.get("人工确认"),
+                    "新值": returned.get("人工确认"),
+                })
+        with st.expander(f"{field_name}编辑同步诊断", expanded=False):
+            st.json({
+                "field_name": field_name,
+                "component_key": component_key,
+                "sync_mode": "streamlit_data_editor_return",
+                "event_type": "data_editor_value_change_rerun",
+                "can_edit": can_edit,
+                "response_row_count": len(returned_rows),
+                "returned_row_ids": [row.get("row_id") for row in returned_rows],
+                "changed_rows": changed_rows,
+                "drafts": drafts,
+                "dirty_ids": st.session_state[field_dirty_key],
+                "save_disabled": save_button_disabled(can_edit, bool(st.session_state[field_dirty_key])),
+                "revision": int(state.get("revision") or 0),
+                "pending_manual_count": int(compute_review_stats(items, state).get("pending_manual") or 0),
+            })
     _, save_column = st.columns([8, 1])
     save_clicked = save_column.button(
         "保存修改",
@@ -385,7 +381,8 @@ def render_compact_review(task_dir, review_dir, task_id: str, items: list[dict[s
         if save_clicked:
             field_dirty_key = field_dirty_state_key(dirty_key, field_name)
             try:
-                state = _save_review_changes(task_dir, review_dir, task_id, state, session_id, drafts_key, field_dirty_key)
+                field_drafts_key = field_drafts_state_key(drafts_key, field_name)
+                state = _save_review_changes(task_dir, review_dir, task_id, state, session_id, field_drafts_key, field_dirty_key)
             except (ReviewConflictError, ReviewLockError) as exc:
                 st.error(str(exc))
             else:
