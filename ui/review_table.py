@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 import pandas as pd
 import streamlit as st
+from st_aggrid import AgGrid, DataReturnMode, GridOptionsBuilder, GridUpdateMode, JsCode
 
 from core.review_store import ReviewConflictError, ReviewLockError, compute_review_stats, load_review_items, load_review_state, update_task_meta
 from core.review_table import PENDING_REVIEW_LABEL, apply_editor_changes, field_rows, result_display, save_dirty_reviews
@@ -39,9 +40,30 @@ def editor_key(field_name: str, task_id: str, can_edit: bool = True) -> str:
 
 
 def aggrid_key(field_name: str, task_id: str, can_edit: bool = True) -> str:
-    """Backward-compatible alias for tests and old session cleanup tooling."""
+    """Keep stable, independent identities for both Manual AG Grid tables."""
 
-    return editor_key(field_name, task_id, can_edit)
+    mode = "edit" if can_edit else "view"
+    return f"review-aggrid-manual-v1-{mode}-{field_name}-{task_id}"
+
+
+def review_editor_mode() -> str:
+    """Select exactly one review editor, defaulting to the Manual AG Grid."""
+
+    value = os.getenv("REVIEW_EDITOR_MODE", "aggrid_manual").strip().lower()
+    return "data_editor" if value == "data_editor" else "aggrid_manual"
+
+
+def manual_update_event_name(response: Any) -> str:
+    """Return the collector trigger emitted by the patched Manual button."""
+
+    event_data = getattr(response, "event_data", None)
+    if not isinstance(event_data, dict):
+        return ""
+    return str(
+        event_data.get("streamlitRerunEventTriggerName")
+        or event_data.get("type")
+        or ""
+    )
 
 
 def review_phase(items: list[dict[str, Any]], state_items: dict[str, Any]) -> tuple[str, int, int]:
@@ -220,6 +242,96 @@ def review_grid_debug_enabled() -> bool:
     return os.getenv("REVIEW_GRID_DEBUG", "false").strip().lower() == "true"
 
 
+def build_review_grid_options(
+    frame: pd.DataFrame,
+    field_name: str,
+    *,
+    can_edit: bool,
+) -> dict[str, Any]:
+    """Build the sortable, filterable, paginated Manual review grid."""
+
+    builder = GridOptionsBuilder.from_dataframe(frame)
+    builder.configure_default_column(
+        sortable=True,
+        filter=True,
+        resizable=True,
+        suppressHeaderMenuButton=False,
+    )
+    for hidden in ("row_id", "item_id", "field_key"):
+        builder.configure_column(hidden, hide=True)
+    builder.configure_column("序号", width=68, minWidth=62, maxWidth=74)
+    layout = grid_column_layout(field_name)
+    for signal_name in ("EEA4.0信号名", "EEA5.1信号名"):
+        builder.configure_column(
+            signal_name,
+            tooltipField=signal_name,
+            **layout[signal_name],
+        )
+    for value_name in (f"EEA4.0{field_name}", f"EEA5.1{field_name}"):
+        options = {
+            **layout[value_name],
+            "tooltipField": value_name,
+        }
+        if field_name == "信号值描述":
+            options.update(description_cell_options())
+        builder.configure_column(value_name, **options)
+    builder.configure_column(
+        "AI判断结果",
+        tooltipField="AI判断结果",
+        **layout["AI判断结果"],
+    )
+    builder.configure_column(
+        "人工确认",
+        editable=can_edit,
+        pinned="right",
+        cellEditor="agSelectCellEditor",
+        cellEditorParams={
+            "values": [
+                PENDING_REVIEW_LABEL,
+                result_display(field_name, "same"),
+                result_display(field_name, "different"),
+            ]
+        },
+        cellStyle=JsCode(
+            """
+            function(params) {
+                if (params.value && params.value.startsWith("🟢")) {
+                    return {
+                        color: "#137333",
+                        backgroundColor: "#e6f4ea",
+                        fontWeight: "700"
+                    };
+                }
+                return {
+                    color: "#b3261e",
+                    backgroundColor: "#fce8e6",
+                    fontWeight: "700"
+                };
+            }
+            """
+        ),
+        **layout["人工确认"],
+    )
+    builder.configure_column(
+        "详情",
+        editable=True,
+        pinned="right",
+        cellEditor="agCheckboxCellEditor",
+        cellRenderer="agCheckboxCellRenderer",
+        **layout["详情"],
+    )
+    builder.configure_grid_options(
+        pagination=True,
+        paginationPageSize=10,
+        paginationPageSizeSelector=[5, 10, 20, 50, 100],
+        animateRows=False,
+        tooltipShowDelay=250,
+        rowHeight=34,
+        getRowId=JsCode("function(params) { return params.data.row_id; }"),
+    )
+    return builder.build()
+
+
 def _render_detail(item: dict[str, Any], field_key: str, review: dict[str, Any], display_text: Callable[[Any], str]) -> None:
     field_name = field_key.split("#", 1)[0]
     matching = [diff for diff in item.get("field_diffs") or [] if diff.get("diff_field") == field_name]
@@ -242,7 +354,7 @@ def _render_detail(item: dict[str, Any], field_key: str, review: dict[str, Any],
             )
 
 
-def _render_field_table(field_name: str, task_id: str, items: list[dict[str, Any]], state: dict[str, Any], can_edit: bool, drafts_key: str, dirty_key: str, detail_key: str, version_key: str, display_text: Callable[[Any], str]) -> bool:
+def _render_field_table_data_editor(field_name: str, task_id: str, items: list[dict[str, Any]], state: dict[str, Any], can_edit: bool, drafts_key: str, dirty_key: str, detail_key: str, version_key: str, display_text: Callable[[Any], str]) -> bool:
     state_items = state.get("items", {})
     field_drafts_key = field_drafts_state_key(drafts_key, field_name)
     drafts = st.session_state.setdefault(field_drafts_key, {})
@@ -336,6 +448,162 @@ def _render_field_table(field_name: str, task_id: str, items: list[dict[str, Any
     return save_clicked
 
 
+def _render_field_table_aggrid(
+    field_name: str,
+    task_id: str,
+    items: list[dict[str, Any]],
+    state: dict[str, Any],
+    can_edit: bool,
+    drafts_key: str,
+    dirty_key: str,
+    detail_key: str,
+    version_key: str,
+    display_text: Callable[[Any], str],
+) -> bool:
+    """Render one isolated AG Grid and return whether Manual was submitted."""
+
+    del version_key
+    state_items = state.get("items", {})
+    field_drafts_key = field_drafts_state_key(drafts_key, field_name)
+    drafts = st.session_state.setdefault(field_drafts_key, {})
+    rows = field_rows(items, state_items, field_name, drafts)
+    if not rows:
+        st.info(f"本任务没有{field_name}差异。")
+        return False
+
+    grid_rows = [{**row, "详情": False} for row in rows]
+    frame = pd.DataFrame(grid_rows)
+    field_dirty_key = field_dirty_state_key(dirty_key, field_name)
+    dirty = set(st.session_state.setdefault(field_dirty_key, []))
+    component_key = aggrid_key(field_name, task_id, can_edit)
+    response = AgGrid(
+        frame,
+        gridOptions=build_review_grid_options(
+            frame,
+            field_name,
+            can_edit=can_edit,
+        ),
+        height=min(
+            720,
+            (86 if field_name == "信号值描述" else 42) * min(len(rows), 15)
+            + 86,
+        ),
+        update_mode=GridUpdateMode.MANUAL,
+        update_on=[],
+        data_return_mode=DataReturnMode.AS_INPUT,
+        allow_unsafe_jscode=True,
+        show_toolbar=True,
+        show_search=True,
+        show_download_button=False,
+        theme="streamlit",
+        key=component_key,
+        try_to_convert_back_to_original_types=False,
+        debug=review_grid_debug_enabled(),
+    )
+    event_name = manual_update_event_name(response)
+    manual_submitted = event_name == "manualUpdate"
+    returned = getattr(response, "data", None)
+    returned_rows = (
+        returned.to_dict("records")
+        if isinstance(returned, pd.DataFrame)
+        else list(returned or [])
+    )
+    if manual_submitted:
+        dirty = capture_grid_changes(
+            returned_rows,
+            grid_rows,
+            state_items,
+            drafts,
+            dirty,
+        )
+        st.session_state[field_dirty_key] = sorted(dirty)
+        chosen = next(
+            (
+                str(row.get("row_id") or "")
+                for row in returned_rows
+                if bool(row.get("详情"))
+            ),
+            "",
+        )
+        st.session_state[field_detail_state_key(detail_key, field_name)] = chosen
+
+    if review_grid_debug_enabled():
+        with st.expander(f"{field_name}AG Grid Manual同步诊断", expanded=False):
+            st.json(
+                {
+                    "field_name": field_name,
+                    "component_key": component_key,
+                    "sync_mode": "aggrid_manual_collector",
+                    "event_name": event_name,
+                    "can_edit": can_edit,
+                    "response_row_count": len(returned_rows),
+                    "returned_row_ids": [
+                        row.get("row_id") for row in returned_rows
+                    ],
+                    "drafts": drafts,
+                    "dirty_ids": st.session_state[field_dirty_key],
+                    "revision": int(state.get("revision") or 0),
+                    "pending_manual_count": int(
+                        compute_review_stats(items, state).get("pending_manual") or 0
+                    ),
+                }
+            )
+
+    selected = str(
+        st.session_state.get(field_detail_state_key(detail_key, field_name)) or ""
+    )
+    if "::" in selected:
+        item_id, field_key = selected.split("::", 1)
+        if field_key.split("#", 1)[0] == field_name:
+            item = next(
+                (
+                    candidate
+                    for candidate in items
+                    if candidate.get("item_id") == item_id
+                ),
+                None,
+            )
+            if item:
+                _render_detail(
+                    item,
+                    field_key,
+                    state.get("items", {}).get(item_id, {}),
+                    display_text,
+                )
+    return manual_submitted and can_edit
+
+
+def _render_field_table(
+    field_name: str,
+    task_id: str,
+    items: list[dict[str, Any]],
+    state: dict[str, Any],
+    can_edit: bool,
+    drafts_key: str,
+    dirty_key: str,
+    detail_key: str,
+    version_key: str,
+    display_text: Callable[[Any], str],
+) -> bool:
+    renderer = (
+        _render_field_table_data_editor
+        if review_editor_mode() == "data_editor"
+        else _render_field_table_aggrid
+    )
+    return renderer(
+        field_name,
+        task_id,
+        items,
+        state,
+        can_edit,
+        drafts_key,
+        dirty_key,
+        detail_key,
+        version_key,
+        display_text,
+    )
+
+
 def _save_review_changes(task_dir, review_dir, task_id: str, state: dict[str, Any], session_id: str, drafts_key: str, dirty_key: str) -> dict[str, Any]:
     dirty = set(st.session_state.setdefault(dirty_key, []))
     state = save_dirty_reviews(
@@ -347,6 +615,7 @@ def _save_review_changes(task_dir, review_dir, task_id: str, state: dict[str, An
         session_id=session_id,
     )
     st.session_state[dirty_key] = []
+    st.session_state[drafts_key] = {}
     saved_stats = compute_review_stats(load_review_items(review_dir), state)
     update_task_meta(
         task_dir,
@@ -377,14 +646,19 @@ def render_compact_review(task_dir, review_dir, task_id: str, items: list[dict[s
         st.success("所有需要人工确认的描述值和单位均已完成。")
     for field_name in table_order:
         st.subheader("信号值描述判断" if field_name == "信号值描述" else "单位判断")
-        save_clicked = _render_field_table(field_name, task_id, items, state, can_edit, drafts_key, dirty_key, detail_key, version_key, display_text)
-        if save_clicked:
+        submitted = _render_field_table(field_name, task_id, items, state, can_edit, drafts_key, dirty_key, detail_key, version_key, display_text)
+        if submitted:
             field_dirty_key = field_dirty_state_key(dirty_key, field_name)
+            if not st.session_state.get(field_dirty_key):
+                st.info(f"{field_name}没有需要保存的修改。")
+                continue
             try:
                 field_drafts_key = field_drafts_state_key(drafts_key, field_name)
                 state = _save_review_changes(task_dir, review_dir, task_id, state, session_id, field_drafts_key, field_dirty_key)
             except (ReviewConflictError, ReviewLockError) as exc:
                 st.error(str(exc))
+            except Exception as exc:
+                st.error(f"{field_name}保存失败：{exc}")
             else:
                 st.success("人工确认结果已保存。")
                 st.rerun()

@@ -38,7 +38,7 @@ class RecordingClient:
     def send_file(self, user_id: str | None = None, file_path: Path | None = None, *, chat_id: str | None = None, timeout: int | None = None) -> str | None:
         if self.fail:
             raise RuntimeError("file boom")
-        self.sent.append((chat_id or user_id or "", f"FILE:{Path(file_path or "").name}:{timeout}"))
+        self.sent.append((chat_id or user_id or "", f"FILE:{Path(file_path or '').name}:{timeout}"))
         return f"file_{len(self.sent)}"
 
     def send_progress_card(self, card: dict, *, chat_id: str | None = None, open_id: str | None = None) -> str:

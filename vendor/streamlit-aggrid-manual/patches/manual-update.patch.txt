@@ -1,0 +1,14 @@
+Upstream bundle fragment:
+
+onManualUpdateClick:()=>{this.state.debug&&console.log("Manual update triggered")}
+
+Project-local replacement:
+
+onManualUpdateClick:()=>{var e;null===(e=this.state.api)||void 0===e||e.stopEditing(),this.state.debug&&console.log("Manual update triggered"),this.returnGridValue({type:"manualUpdate",api:this.state.api},"manualUpdate")}
+
+Behavioral change:
+
+1. Commit an active AG Grid cell editor with api.stopEditing().
+2. Invoke the component's existing returnGridValue() collector pipeline.
+3. Label the triggering event as manualUpdate.
+4. Let the existing pipeline call Streamlit.setComponentValue().

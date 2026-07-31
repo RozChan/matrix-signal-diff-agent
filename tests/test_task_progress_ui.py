@@ -11,10 +11,11 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.confluence_task_store import add_sources, update_source
+from core.review_history import history_counts, history_database_path
 from core.review_store import acquire_review_lock, compute_review_stats, create_task_meta, init_review_state, load_task_meta, update_task_meta
 from core.review_table import PENDING_REVIEW_LABEL, apply_editor_changes, field_rows, format_multiline_enum_value, pending_review_count, result_display, result_value, save_dirty_reviews
 from core.task_progress import ACTIVE_STATUSES, allowed_admin_actions, beijing_time, build_task_progress, choose_default_task, overall_percent
-from ui.review_table import ReviewGridSyncError, aggrid_key, capture_grid_changes, capture_grid_response, chinese_review_stats, description_cell_options, field_detail_state_key, field_dirty_state_key, field_drafts_state_key, grid_column_layout, initialize_review_session, review_phase, review_table_order, save_button_disabled, selected_grid_row_id, system_difference_rows
+from ui.review_table import ReviewGridSyncError, aggrid_key, build_review_grid_options, capture_grid_changes, capture_grid_response, chinese_review_stats, description_cell_options, editor_key, field_detail_state_key, field_dirty_state_key, field_drafts_state_key, grid_column_layout, initialize_review_session, manual_update_event_name, review_editor_mode, review_phase, review_table_order, save_button_disabled, selected_grid_row_id, system_difference_rows
 import ui.review_table as review_table_ui
 
 
@@ -161,6 +162,48 @@ def test_binary_editor_drafts_only_mark_changed_fields() -> None:
 def test_editor_key_is_stable_and_separate_for_both_fields() -> None:
     assert aggrid_key("信号值描述", "task", True) == aggrid_key("信号值描述", "task", True)
     assert aggrid_key("信号值描述", "task", True) != aggrid_key("信号值描述", "task", False)
+    assert aggrid_key("信号值描述", "task", True) != aggrid_key("单位", "task", True)
+    assert aggrid_key("单位", "task", True) != editor_key("单位", "task", True)
+
+
+def test_review_editor_mode_defaults_to_manual_and_supports_emergency_fallback(monkeypatch) -> None:
+    monkeypatch.delenv("REVIEW_EDITOR_MODE", raising=False)
+    assert review_editor_mode() == "aggrid_manual"
+    monkeypatch.setenv("REVIEW_EDITOR_MODE", "data_editor")
+    assert review_editor_mode() == "data_editor"
+    monkeypatch.setenv("REVIEW_EDITOR_MODE", "invalid")
+    assert review_editor_mode() == "aggrid_manual"
+
+
+def test_manual_update_event_name_reads_patched_collector_trigger() -> None:
+    response = SimpleNamespace(
+        event_data={
+            "type": "manualUpdate",
+            "streamlitRerunEventTriggerName": "manualUpdate",
+        }
+    )
+    assert manual_update_event_name(response) == "manualUpdate"
+    assert manual_update_event_name(SimpleNamespace(event_data=None)) == ""
+
+
+def test_manual_grid_options_keep_identity_hidden_and_full_grid_features() -> None:
+    rows = [{
+        "row_id": "a::单位", "item_id": "a", "field_key": "单位", "序号": 1,
+        "EEA4.0信号名": "A", "EEA5.1信号名": "B",
+        "EEA4.0单位": "Nm", "EEA5.1单位": "N·m",
+        "AI判断结果": "疑似可忽略", "人工确认": PENDING_REVIEW_LABEL, "详情": False,
+    }]
+    options = build_review_grid_options(pd.DataFrame(rows), "单位", can_edit=True)
+    columns = {column["field"]: column for column in options["columnDefs"]}
+    assert all(columns[name]["hide"] is True for name in ("row_id", "item_id", "field_key"))
+    assert options["pagination"] is True
+    assert options["paginationPageSize"] == 10
+    assert options["paginationPageSizeSelector"] == [5, 10, 20, 50, 100]
+    assert columns["人工确认"]["pinned"] == "right"
+    assert columns["人工确认"]["editable"] is True
+    assert columns["人工确认"]["cellEditor"] == "agSelectCellEditor"
+    assert columns["详情"]["pinned"] == "right"
+    assert options["columnDefs"][-1]["field"] == "详情"
 
 
 def test_aggrid_column_layout_bounds_long_values_and_keeps_actions_compact() -> None:
@@ -198,6 +241,19 @@ def test_editor_response_persists_value_change_before_save_rerun() -> None:
 
     assert dirty == {"a::单位"}
     assert drafts["a::单位"]["result"] == "same"
+
+
+def test_manual_submission_without_a_real_change_has_no_dirty_rows() -> None:
+    source = [{
+        "row_id": "a::单位",
+        "item_id": "a",
+        "field_key": "单位",
+        "人工确认": PENDING_REVIEW_LABEL,
+    }]
+    drafts: dict[str, dict] = {}
+    state_items = {"a": {"field_reviews": {"单位": {"result": ""}}}}
+    assert capture_grid_changes(source, source, state_items, drafts, set()) == set()
+    assert drafts == {}
 
 
 def test_editor_change_back_to_saved_value_clears_dirty_row() -> None:
@@ -279,7 +335,84 @@ def test_ui_save_updates_json_revision_reviewed_and_pending_count(tmp_path: Path
     assert saved["revision"] == state["revision"] + 1
     assert pending_review_count(saved) == 1
     assert session_state[dirty_key] == []
+    assert session_state[drafts_key] == {}
     assert load_task_meta(tdir)["pending_manual_count"] == 1
+
+
+def test_description_and_unit_manual_saves_are_independent_and_write_history(tmp_path: Path, monkeypatch) -> None:
+    tdir = make_task(tmp_path, "task-dual-manual")
+    review_dir = tdir / "review"
+    items = [review_item("a", with_unit=True)]
+    state = init_review_state(review_dir, "task-dual-manual", items)
+    (review_dir / "review_items.json").write_text(
+        json.dumps(items, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    acquire_review_lock(tdir, "session-1")
+    description_drafts = field_drafts_state_key(
+        "review-drafts-task-dual-manual", "信号值描述"
+    )
+    description_dirty = field_dirty_state_key(
+        "review-dirty-task-dual-manual", "信号值描述"
+    )
+    unit_drafts = field_drafts_state_key("review-drafts-task-dual-manual", "单位")
+    unit_dirty = field_dirty_state_key("review-dirty-task-dual-manual", "单位")
+    session_state = {
+        description_drafts: {
+            "a::信号值描述": {
+                "item_id": "a",
+                "field_key": "信号值描述",
+                "result": "same",
+            }
+        },
+        description_dirty: ["a::信号值描述"],
+        unit_drafts: {
+            "a::单位": {
+                "item_id": "a",
+                "field_key": "单位",
+                "result": "different",
+            }
+        },
+        unit_dirty: ["a::单位"],
+    }
+    monkeypatch.setattr(
+        review_table_ui,
+        "st",
+        SimpleNamespace(session_state=session_state),
+    )
+
+    after_description = review_table_ui._save_review_changes(
+        tdir,
+        review_dir,
+        "task-dual-manual",
+        state,
+        "session-1",
+        description_drafts,
+        description_dirty,
+    )
+    assert after_description["revision"] == state["revision"] + 1
+    assert pending_review_count(after_description) == 1
+    assert session_state[unit_dirty] == ["a::单位"]
+    assert session_state[unit_drafts]["a::单位"]["result"] == "different"
+
+    after_unit = review_table_ui._save_review_changes(
+        tdir,
+        review_dir,
+        "task-dual-manual",
+        after_description,
+        "session-1",
+        unit_drafts,
+        unit_dirty,
+    )
+    assert after_unit["revision"] == state["revision"] + 2
+    assert pending_review_count(after_unit) == 0
+    assert after_unit["items"]["a"]["field_reviews"]["信号值描述"]["result"] == "same"
+    assert after_unit["items"]["a"]["field_reviews"]["单位"]["result"] == "different"
+    assert load_task_meta(tdir)["pending_manual_count"] == 0
+    assert history_counts(db_path=history_database_path(review_dir)) == {
+        "decisions": 2,
+        "events": 2,
+    }
 
 
 def test_ui_save_failure_preserves_current_table_drafts_and_dirty_rows(tmp_path: Path, monkeypatch) -> None:
@@ -307,3 +440,27 @@ def test_review_session_keys_are_initialized_before_first_render() -> None:
     assert drafts_key == "review-drafts-new-task"
     assert drafts == {}
     assert session == {drafts_key: {}, dirty_key: [], detail_key: "", version_key: 0}
+
+
+def test_renderer_uses_exactly_one_mode_and_preserves_data_editor_fallback(monkeypatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(
+        review_table_ui,
+        "_render_field_table_aggrid",
+        lambda *args, **kwargs: calls.append("aggrid") or False,
+    )
+    monkeypatch.setattr(
+        review_table_ui,
+        "_render_field_table_data_editor",
+        lambda *args, **kwargs: calls.append("data_editor") or False,
+    )
+    args = ("单位", "task", [], {}, True, "drafts", "dirty", "detail", "version", str)
+
+    monkeypatch.delenv("REVIEW_EDITOR_MODE", raising=False)
+    review_table_ui._render_field_table(*args)
+    assert calls == ["aggrid"]
+
+    calls.clear()
+    monkeypatch.setenv("REVIEW_EDITOR_MODE", "data_editor")
+    review_table_ui._render_field_table(*args)
+    assert calls == ["data_editor"]

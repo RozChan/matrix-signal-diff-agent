@@ -1,0 +1,71 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from tools.patch_streamlit_aggrid_manual import (
+    BUNDLE_RELATIVE_PATH,
+    ORIGINAL_HANDLER,
+    ORIGINAL_SHA256,
+    PATCHED_HANDLER,
+    PATCHED_SHA256,
+    apply_exact_patch,
+    patch_bundle,
+    sha256_bytes,
+)
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+UPSTREAM_BUNDLE = (
+    PROJECT_ROOT
+    / "vendor"
+    / "streamlit-aggrid-manual"
+    / "upstream"
+    / BUNDLE_RELATIVE_PATH
+)
+
+
+def copied_source(tmp_path: Path) -> Path:
+    bundle = tmp_path / BUNDLE_RELATIVE_PATH
+    bundle.parent.mkdir(parents=True)
+    bundle.write_bytes(UPSTREAM_BUNDLE.read_bytes())
+    return tmp_path
+
+
+def test_upstream_bundle_has_reviewed_original_hash() -> None:
+    assert sha256_bytes(UPSTREAM_BUNDLE.read_bytes()) == ORIGINAL_SHA256
+
+
+def test_patch_requires_exactly_one_handler_match() -> None:
+    with pytest.raises(RuntimeError, match="found 0"):
+        apply_exact_patch(b"no handler")
+    with pytest.raises(RuntimeError, match="found 2"):
+        apply_exact_patch(ORIGINAL_HANDLER + b"x" + ORIGINAL_HANDLER)
+
+
+def test_patch_produces_reviewed_hash(tmp_path: Path) -> None:
+    source = copied_source(tmp_path)
+    result = patch_bundle(source)
+    patched = (source / BUNDLE_RELATIVE_PATH).read_bytes()
+    assert result["before_sha256"] == ORIGINAL_SHA256
+    assert result["after_sha256"] == PATCHED_SHA256
+    assert patched.count(ORIGINAL_HANDLER) == 0
+    assert patched.count(PATCHED_HANDLER) == 1
+
+
+def test_patch_is_idempotent_and_does_not_patch_twice(tmp_path: Path) -> None:
+    source = copied_source(tmp_path)
+    patch_bundle(source)
+    result = patch_bundle(source)
+    assert result["already_patched"] is True
+    assert result["before_sha256"] == PATCHED_SHA256
+    assert result["after_sha256"] == PATCHED_SHA256
+
+
+def test_patch_rejects_unreviewed_bundle_hash(tmp_path: Path) -> None:
+    source = copied_source(tmp_path)
+    bundle = source / BUNDLE_RELATIVE_PATH
+    bundle.write_bytes(bundle.read_bytes() + b"unexpected")
+    with pytest.raises(RuntimeError, match="unexpected bundle hash"):
+        patch_bundle(source)
