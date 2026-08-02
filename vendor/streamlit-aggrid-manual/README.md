@@ -17,13 +17,15 @@ PyPI source distribution for the matrix review application.
 - Original bundle SHA256:
   `35b1e81df4820c9ec69fe96c95473cd28af2add8b84d997b0b1093b6b3538d10`
 - Patched bundle SHA256:
-  `10c9cadd87182fc29379074f84ca74e23b18e6ce6cd8e58e62ab490e932830b7`
+  `986a070501f6bc75b23d019876a7d654e086590742ffae267d1ad7ab2ff8481d`
+- Local wheel SHA256:
+  `1d285af322894f8ccde11653cab15370a7c08c97ae4586447ed248c3927c5d4e`
 
 The sdist contains the Python sources, compiled frontend, and source map, but
 not the complete TypeScript build workspace. `upstream/` remains byte-for-byte
 equivalent to the extracted sdist. The build helper copies it to an isolated
 temporary directory, applies the reviewed compiled-artifact patch, changes the
-package version to `1.1.9+manual.1`, and builds a wheel.
+package version to `1.1.9+manual.2`, and builds a wheel.
 
 ## Patch purpose
 
@@ -33,8 +35,15 @@ component's existing `returnGridValue()` collector with event name
 `manualUpdate`. The existing collector continues to call
 `Streamlit.setComponentValue()`.
 
-The patch is guarded by both the original bundle SHA256 and an exact
-single-match check. It refuses unknown inputs and recognizes an already patched
+The `manual.2` patch also replaces the compiled toolbar with one permanently
+visible red save button. Its title and accessible label are both `保存修改`,
+and it uses a white save icon. Collapse, drag, fullscreen, search, and CSV
+download controls are not rendered. The Manual handler and collector pipeline
+remain unchanged from `manual.1`.
+
+The patch is guarded by the original bundle SHA256, an exact single-match check
+for the Manual handler, and unique toolbar boundaries plus the reviewed toolbar
+component SHA256. It refuses unknown inputs and recognizes an already patched
 bundle without applying the replacement twice. It does not modify
 `site-packages`, inspect the DOM, or inject browser-time JavaScript.
 

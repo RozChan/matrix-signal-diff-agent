@@ -12,3 +12,5 @@ Behavioral change:
 2. Invoke the component's existing returnGridValue() collector pipeline.
 3. Label the triggering event as manualUpdate.
 4. Let the existing pipeline call Streamlit.setComponentValue().
+
+The manual.2 build leaves this handler byte-for-byte identical to manual.1.

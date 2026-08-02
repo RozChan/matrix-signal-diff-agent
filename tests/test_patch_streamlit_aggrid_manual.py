@@ -10,7 +10,11 @@ from tools.patch_streamlit_aggrid_manual import (
     ORIGINAL_SHA256,
     PATCHED_HANDLER,
     PATCHED_SHA256,
+    PATCHED_TOOLBAR,
+    TOOLBAR_END,
+    TOOLBAR_START,
     apply_exact_patch,
+    find_original_toolbar,
     patch_bundle,
     sha256_bytes,
 )
@@ -44,6 +48,27 @@ def test_patch_requires_exactly_one_handler_match() -> None:
         apply_exact_patch(ORIGINAL_HANDLER + b"x" + ORIGINAL_HANDLER)
 
 
+def test_patch_requires_exactly_one_toolbar_boundary() -> None:
+    content = UPSTREAM_BUNDLE.read_bytes()
+    with pytest.raises(RuntimeError, match="start=0, end=1"):
+        find_original_toolbar(content.replace(TOOLBAR_START, b"missing", 1))
+    with pytest.raises(RuntimeError, match="start=2, end=1"):
+        find_original_toolbar(TOOLBAR_START + content)
+
+
+def test_patch_rejects_changed_toolbar_component() -> None:
+    content = UPSTREAM_BUNDLE.read_bytes()
+    start, end, toolbar = find_original_toolbar(content)
+    assert content[end:].startswith(TOOLBAR_END)
+    changed = (
+        content[:start]
+        + toolbar.replace(b"Quick Search", b"Other Search")
+        + content[end:]
+    )
+    with pytest.raises(RuntimeError, match="toolbar hash"):
+        find_original_toolbar(changed)
+
+
 def test_patch_produces_reviewed_hash(tmp_path: Path) -> None:
     source = copied_source(tmp_path)
     result = patch_bundle(source)
@@ -52,6 +77,12 @@ def test_patch_produces_reviewed_hash(tmp_path: Path) -> None:
     assert result["after_sha256"] == PATCHED_SHA256
     assert patched.count(ORIGINAL_HANDLER) == 0
     assert patched.count(PATCHED_HANDLER) == 1
+    assert patched.count(PATCHED_TOOLBAR) == 1
+    assert patched.count("保存修改".encode("utf-8")) == 2
+    assert b"Collapse Toolbar" not in patched
+    assert b"Toggle Fullscreen View" not in patched
+    assert b"Download as CSV" not in patched
+    assert b"Quick Search" not in patched
 
 
 def test_patch_is_idempotent_and_does_not_patch_twice(tmp_path: Path) -> None:

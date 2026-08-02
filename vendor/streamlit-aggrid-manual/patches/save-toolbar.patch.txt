@@ -1,0 +1,17 @@
+Upstream compiled GridToolBar behavior:
+
+- Collapsible and draggable floating toolbar.
+- Manual Update, fullscreen, CSV download, and search controls.
+- Toolbar hidden until the grid is hovered.
+
+Project-local manual.2 replacement:
+
+- Render exactly one save button when Manual mode is enabled.
+- Keep the button permanently visible at the top-right of the grid.
+- Use a red background, white save icon, and Chinese title/aria-label 保存修改.
+- Do not render collapse, drag, fullscreen, search, or download controls.
+
+The patch script identifies the single compiled GridToolBar component between
+its reviewed minified boundaries and verifies the complete original component
+SHA256 before replacing it. Runtime DOM queries and browser-time injection are
+not used.
