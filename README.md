@@ -646,7 +646,7 @@ BOT_ALLOWED_EXTENSIONS=.xlsx,.xlsm,.zip
 9. AI 复核完成后，机器人发送带 token 的人工审核链接：`{REVIEW_BASE_URL}/?task_id=<task_id>&token=<review_token>`。
 10. 用户在 Streamlit 页面完成人工审核并点击“完成审核并生成最终结果”。
 11. 系统生成 `人工审核后最终差异结果.xlsx`，并将 `result_delivery_status` 置为 `pending`。
-12. 机器人检测到 pending 后发送最终 Excel 和全部结果 ZIP；发送成功后状态变为 `delivered`，不会重复发送。
+12. 启用飞书云文档交付后，系统创建结果文档并插入三份正式Excel，机器人发送“打开飞书结果文档”按钮；失败时保留本地结果页作为兜底，成功后状态变为 `delivered`。
 
 ### 文件安全
 
@@ -703,7 +703,7 @@ temp/<task_id>/
 
 - `running`：标记为 `interrupted`，避免误报完成；
 - `awaiting_review` 且通知未发送：重新尝试发送审核链接；
-- `final_exported` 且 `result_delivery_status=pending`：重新尝试发送最终 Excel 和 ZIP；
+- `final_exported` 且飞书文档交付尚未完成：复用已有文档并继续创建或补传失败附件；
 - `delivered`：不重复发送。
 
 ### 当前限制与需本机验证项
@@ -933,8 +933,8 @@ python tools\verify_aggrid_manual_save.py
 最终人工审核结果生成后，可通过本机已完成用户授权的 `lark-cli` 自动创建云文档并插入三份结果Excel：
 
 ```env
-LARK_CLI_PATH=C:\Users\00557616\AppData\Roaming\npm\node_modules\@larksuite\cli\bin\lark-cli.exe
-FEISHU_RESULT_FOLDER_TOKEN=BsY1fW5ojlVpYddB8hdchZETn2b
+LARK_CLI_PATH=C:\path\to\lark-cli.exe
+FEISHU_RESULT_FOLDER_TOKEN=<folder-token>
 FEISHU_DOC_DELIVERY_ENABLED=true
 FEISHU_DOC_CREATE_TIMEOUT_SECONDS=120
 FEISHU_DOC_UPLOAD_TIMEOUT_SECONDS=180
@@ -947,3 +947,7 @@ python -m tools.check_feishu_doc_cli
 ```
 
 该功能只调用 `lark-cli --as user`，不会读取或保存用户Token、refresh token、App Secret或CLI授权缓存。
+
+交付服务只使用任务登记的三份正式结果，并以清晰名称插入云文档：`EEA4.0全量信号矩阵清单.xlsx`、`EEA5.1全量信号矩阵清单.xlsx`、`人工审核后最终差异结果.xlsx`。三份附件全部成功后，第三阶段群机器人消息的主按钮为“打开飞书结果文档”并直接使用本次任务保存的文档URL；交付失败时，本地结果仍保留，消息会明确显示失败并回退到“进入结果下载页”。
+
+公司Windows工作站验收时，先在 `.env` 配置 `LARK_CLI_PATH`、`FEISHU_RESULT_FOLDER_TOKEN` 和 `FEISHU_DOC_DELIVERY_ENABLED=true`，再执行 `python -m tools.check_feishu_doc_cli` 确认当前用户授权及 `docs +create`、`docs +media-insert` 命令可用。随后完成一项测试任务的人工审核，确认目标文件夹只新增一份结果文档、文档内只有上述三个附件、群机器人按钮直接打开该文档。可在管理员页面重试一次失败交付，确认复用原 `document_id` 且只补传失败附件；本地结果下载页应始终保留。
