@@ -128,15 +128,72 @@ def notify_result_ready(task_dir: Path, *, custom_client: FeishuCustomBotClient 
         return False
     delivery = dict(meta.get("feishu_delivery") or {})
     doc_enabled = os.getenv("FEISHU_DOC_DELIVERY_ENABLED", "false").strip().lower() == "true"
-    if doc_enabled and (delivery.get("status") not in {"ready", "delivered"} or not delivery.get("document_url")):
+    attachments = dict(delivery.get("attachments") or {})
+    attachment_keys = ("full_40", "full_51", "compare_final")
+    document_ready = (
+        delivery.get("status") in {"ready", "delivered"}
+        and bool(delivery.get("document_url"))
+        and all((attachments.get(key) or {}).get("status") == "success" for key in attachment_keys)
+    )
+    delivery_failed = delivery.get("status") in {"failed", "partial_failed"}
+    if doc_enabled and not document_ready and not delivery_failed:
         return False
     meta = ensure_result_access(tdir)
     files = allowed_result_files(tdir)
-    document_text = ""
-    if delivery.get("document_url"):
-        document_text = f"\n飞书文档：[{delivery.get('document_title') or '打开飞书云文档'}]({delivery['document_url']})"
-    text = f"任务编号：{meta.get('task_id', tdir.name)}\n完成时间：{beijing_time(meta.get('review_completed_at'))}\n最终文件状态：已生成\n结果文件数量：{len(files)}{document_text}"
-    return _custom_once(tdir, "result_ready", "信号矩阵全量对比最终结果已生成", text, button_text="进入结果下载页", button_url=str(meta.get("result_url") or ""), client=custom_client, force=force)
+    if document_ready:
+        text = (
+            f"任务编号：{meta.get('task_id', tdir.name)}\n"
+            f"完成时间：{beijing_time(meta.get('review_completed_at'))}\n"
+            "最终文件状态：已生成\n"
+            "结果附件数量：3\n"
+            "飞书交付状态：成功\n"
+            f"飞书文档标题：{delivery.get('document_title') or '信号矩阵全量对比最终结果'}"
+        )
+        return _custom_once(
+            tdir,
+            "result_ready",
+            "信号矩阵全量对比最终结果已生成",
+            text,
+            button_text="打开飞书结果文档",
+            button_url=str(delivery["document_url"]),
+            client=custom_client,
+            force=force,
+        )
+    if doc_enabled and delivery_failed:
+        error = str(delivery.get("last_error") or meta.get("delivery_error") or "未知错误")[:800]
+        text = (
+            f"任务编号：{meta.get('task_id', tdir.name)}\n"
+            f"完成时间：{beijing_time(meta.get('review_completed_at'))}\n"
+            "最终文件状态：已生成\n"
+            "飞书交付状态：失败\n"
+            f"失败原因：{error}\n"
+            "本地结果仍已保留，可从结果下载页获取。"
+        )
+        return _custom_once(
+            tdir,
+            "result_ready",
+            "信号矩阵全量对比最终结果已生成",
+            text,
+            button_text="进入结果下载页",
+            button_url=str(meta.get("result_url") or ""),
+            client=custom_client,
+            force=force,
+        )
+    text = (
+        f"任务编号：{meta.get('task_id', tdir.name)}\n"
+        f"完成时间：{beijing_time(meta.get('review_completed_at'))}\n"
+        f"最终文件状态：已生成\n结果文件数量：{len(files)}"
+    )
+    return _custom_once(
+        tdir,
+        "result_ready",
+        "信号矩阵全量对比最终结果已生成",
+        text,
+        button_text="进入结果下载页",
+        button_url=str(meta.get("result_url") or ""),
+        client=custom_client,
+        force=force,
+    )
 
 
 def scan_custom_notifications(custom_client: FeishuCustomBotClient | None = None) -> None:

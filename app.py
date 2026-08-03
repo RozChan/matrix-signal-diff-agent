@@ -529,10 +529,25 @@ def _show_final_export(task_dir: Path, review_dir: Path, *, session_id: str, can
                         with st.spinner("正在创建飞书云文档并插入3个结果附件……"):
                             delivery = publish_task_result_document(task_dir, notify=True)
                     except Exception as exc:  # noqa: BLE001 - cloud delivery must not roll back local export
+                        current_delivery = dict(load_task_meta(task_dir).get("feishu_delivery") or {})
+                        current_delivery.update(
+                            {
+                                "status": "failed",
+                                "error_type": "unexpected_error",
+                                "last_error": str(exc),
+                                "updated_at": utc_now_iso(),
+                            }
+                        )
                         update_task_meta(
                             task_dir,
-                            feishu_delivery={"status": "failed", "error_type": "unexpected_error", "last_error": str(exc), "updated_at": utc_now_iso()},
+                            feishu_delivery=current_delivery,
+                            result_delivery_status="failed",
+                            delivery_error=str(exc),
                         )
+                        try:
+                            notify_result_ready(task_dir)
+                        except Exception:  # noqa: BLE001 - fallback notification cannot roll back generated files
+                            pass
                         delivery = {"success": False, "last_error": str(exc)}
                     if delivery.get("success"):
                         st.success("飞书云文档和3个结果附件已交付。")

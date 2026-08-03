@@ -12,6 +12,7 @@ from openpyxl import Workbook
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.feishu_doc_service import (
+    ATTACHMENT_LABELS,
     FeishuDocumentError,
     extract_last_json_object,
     publish_task_result_document,
@@ -20,6 +21,7 @@ from core.feishu_doc_service import (
     retry_result_notification,
 )
 from core.final_export import FINAL_REVIEW_FILENAME, SHEET_RULES
+from core.notification_router import notify_result_ready
 from core.pipeline import OUTPUT_FILENAMES
 from core.review_store import create_task_meta, init_review_state, load_task_meta, update_task_meta
 
@@ -100,9 +102,21 @@ def test_publish_uses_exact_three_registered_files_and_is_idempotent(tmp_path: P
     assert calls[0][0][1:3] == ["docs", "+create"]
     assert "--parent-token" in calls[0][0] and "folder-token" in calls[0][0]
     uploaded = [Path(call[0][call[0].index("--file") + 1]).name for call in calls[1:]]
-    assert uploaded == [OUTPUT_FILENAMES["full_40"], OUTPUT_FILENAMES["full_51"], FINAL_REVIEW_FILENAME]
+    assert uploaded == [ATTACHMENT_LABELS[key] for key in ("full_40", "full_51", "compare_final")]
     assert all(call[0][call[0].index("--as") + 1] == "user" for call in calls)
-    assert all(call[1] == str(tdir / "output") for call in calls[1:])
+    assert all(Path(str(call[1])).name == "feishu_delivery_attachments" for call in calls[1:])
+    assert all((tdir / "output" / name).is_file() for name in (OUTPUT_FILENAMES["full_40"], OUTPUT_FILENAMES["full_51"], FINAL_REVIEW_FILENAME))
+    create_command = calls[0][0]
+    assert create_command[create_command.index("--title") + 1] == "20260729_090203_信号矩阵全量对比最终结果"
+    content = create_command[create_command.index("--content") + 1]
+    assert "初始待人工确认数量" in content
+    assert all(name in content for name in ATTACHMENT_LABELS.values())
+    saved = load_task_meta(tdir)
+    assert saved["result_delivery_status"] == "ready"
+    assert all(
+        saved["feishu_delivery"]["attachments"][key]["display_name"] == ATTACHMENT_LABELS[key]
+        for key in ATTACHMENT_LABELS
+    )
 
     assert publish_task_result_document(tdir, notify=False)["success"]
     assert len(calls) == 4
@@ -147,6 +161,7 @@ def test_second_attachment_failure_and_retry_only_remaining_files(tmp_path: Path
     assert not result["success"] and result["status"] == "partial_failed"
     assert result["attachments"]["full_40"]["status"] == "success"
     assert result["attachments"]["full_51"]["status"] == "failed"
+    assert load_task_meta(tdir)["result_delivery_status"] == "failed"
 
     retry_calls: list[tuple[list[str], str | None]] = []
     monkeypatch.setattr(subprocess, "run", _success_run(retry_calls))
@@ -163,14 +178,26 @@ def test_cli_missing_create_failure_and_timeout_are_recorded(tmp_path: Path, mon
     assert publish_task_result_document(tdir, notify=False)["error_type"] == "lark_cli_not_found"
 
     monkeypatch.setenv("LARK_CLI_PATH", str(tmp_path / "lark-cli.exe"))
-    monkeypatch.setattr(subprocess, "run", lambda command, **kwargs: subprocess.CompletedProcess(command, 3, stdout="", stderr="permission denied"))
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(command, 3, stdout="", stderr="permission denied folder-token"),
+    )
     assert publish_task_result_document(tdir, notify=False)["error_type"] == "folder_permission_denied"
+    serialized_meta = json.dumps(load_task_meta(tdir), ensure_ascii=False)
+    assert "folder-token" not in serialized_meta
 
     def timeout(command, **kwargs):
         raise subprocess.TimeoutExpired(command, kwargs["timeout"])
 
     monkeypatch.setattr(subprocess, "run", timeout)
     assert publish_task_result_document(tdir, notify=False)["error_type"] == "command_timeout"
+
+
+def test_env_example_does_not_publish_the_company_folder_token() -> None:
+    env_example = (Path(__file__).resolve().parents[1] / ".env.example").read_text(encoding="utf-8")
+    assert "FEISHU_RESULT_FOLDER_TOKEN=\n" in env_example.replace("\r\n", "\n")
+    assert "BsY1fW5ojlVpYddB8hdchZETn2b" not in env_example
 
 
 def test_process_claim_prevents_concurrent_document_creation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -205,7 +232,7 @@ class FakeCustomClient:
         self.cards.append((title, markdown, kwargs))
 
 
-def test_result_notification_contains_document_and_download_links_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_result_notification_uses_document_as_primary_link_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tdir = _task(tmp_path, monkeypatch)
     update_task_meta(
         tdir,
@@ -214,16 +241,63 @@ def test_result_notification_contains_document_and_download_links_once(tmp_path:
             "document_id": "doc-1",
             "document_url": "https://feishu/doc-1",
             "document_title": "title",
-            "attachments": {},
+            "attachments": {key: {"status": "success"} for key in ATTACHMENT_LABELS},
             "result_notification": {"status": "pending"},
         },
     )
     client = FakeCustomClient()
     assert retry_result_notification(tdir, custom_client=client)
     assert len(client.cards) == 1
-    assert "https://feishu/doc-1" in client.cards[0][1]
-    assert "result_token=" in client.cards[0][2]["button_url"]
+    assert "飞书交付状态：成功" in client.cards[0][1]
+    assert client.cards[0][2]["button_text"] == "打开飞书结果文档"
+    assert client.cards[0][2]["button_url"] == "https://feishu/doc-1"
     assert retry_result_notification(tdir, custom_client=client)
     assert len(client.cards) == 1
     assert load_task_meta(tdir)["status"] == "delivered"
+
+
+def test_failed_document_delivery_notifies_local_download_without_failing_task(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tdir = _task(tmp_path, monkeypatch)
+    update_task_meta(
+        tdir,
+        feishu_delivery={
+            "status": "partial_failed",
+            "document_id": "doc-1",
+            "document_url": "https://feishu/doc-1",
+            "document_title": "title",
+            "last_error": "second attachment denied",
+            "attachments": {
+                "full_40": {"status": "success"},
+                "full_51": {"status": "failed"},
+                "compare_final": {"status": "pending"},
+            },
+        },
+        result_delivery_status="failed",
+    )
+    client = FakeCustomClient()
+
+    assert notify_result_ready(tdir, custom_client=client)
+
+    assert len(client.cards) == 1
+    assert "飞书交付状态：失败" in client.cards[0][1]
+    assert "second attachment denied" in client.cards[0][1]
+    assert client.cards[0][2]["button_text"] == "进入结果下载页"
+    assert "result_token=" in client.cards[0][2]["button_url"]
+    assert load_task_meta(tdir)["status"] == "final_exported"
+
+    update_task_meta(
+        tdir,
+        feishu_delivery={
+            "status": "ready",
+            "document_id": "doc-1",
+            "document_url": "https://feishu/doc-1",
+            "document_title": "title",
+            "attachments": {key: {"status": "success"} for key in ATTACHMENT_LABELS},
+            "result_notification": {"status": "pending"},
+        },
+    )
+    assert retry_result_notification(tdir, custom_client=client)
+    assert len(client.cards) == 2
+    assert client.cards[1][2]["button_text"] == "打开飞书结果文档"
+    assert client.cards[1][2]["button_url"] == "https://feishu/doc-1"
 
