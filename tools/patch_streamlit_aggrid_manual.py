@@ -12,7 +12,7 @@ BUNDLE_RELATIVE_PATH = Path(
     "st_aggrid/frontend/build/static/js/main.db06ce24.js"
 )
 ORIGINAL_SHA256 = "35b1e81df4820c9ec69fe96c95473cd28af2add8b84d997b0b1093b6b3538d10"
-PATCHED_SHA256 = "986a070501f6bc75b23d019876a7d654e086590742ffae267d1ad7ab2ff8481d"
+PATCHED_SHA256 = "a892399205a5547613854f847a362e7a3f375deb597e6c9434d655c757c01adb"
 
 ORIGINAL_HANDLER = (
     'onManualUpdateClick:()=>{this.state.debug&&'
@@ -34,18 +34,40 @@ ORIGINAL_TOOLBAR_SHA256 = (
 
 PATCHED_TOOLBAR = (
     'const Hje=e=>{let{enabled:t,onManualUpdateClick:i,'
-    'showManualUpdateButton:n=!1}=e;return t&&n?(0,_je.jsx)("div",'
-    '{className:"grid-toolbar",style:{top:10,right:10,left:"auto",'
-    'opacity:1,visibility:"visible",cursor:"default"},children:(0,_je.jsx)'
-    '("button",{className:"toolbar-button update-button",onClick:i,'
-    'title:"保存修改","aria-label":"保存修改",style:{backgroundColor:'
-    '"#d32f2f",color:"#fff"},children:(0,_je.jsx)("svg",{xmlns:'
-    '"http://www.w3.org/2000/svg",viewBox:"0 0 24 24",width:"16",'
-    'height:"16",fill:"currentColor","aria-hidden":"true",children:'
-    '(0,_je.jsx)("path",{d:"M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 '
-    '2 2h14a2 2 0 0 0 2-2V7l-4-4zM7 5h8v4H7V5zm5 14a3 3 0 1 1 '
-    '0-6 3 3 0 0 1 0 6z"})})})}):null}'
+    'showManualUpdateButton:n=!1}=e;return t&&n?(0,_je.jsxs)("div",'
+    '{className:"grid-toolbar",style:{position:"relative",top:"auto",'
+    'right:"auto",left:"auto",width:"100%",height:44,flex:"0 0 44px",'
+    'boxSizing:"border-box",opacity:1,visibility:"visible",cursor:'
+    '"default",borderRadius:0,padding:"6px 10px",boxShadow:"none",'
+    'justifyContent:"space-between",backgroundColor:"#fff",border:'
+    '"1px solid #ddd",borderBottom:"none"},children:[(0,_je.jsx)'
+    '("span",{style:{fontSize:"13px",color:"#666"},children:'
+    '"修改人工确认后请保存"}),(0,_je.jsxs)("button",{className:'
+    '"toolbar-button update-button",onClick:i,title:"保存修改",'
+    '"aria-label":"保存修改",style:{backgroundColor:"#d32f2f",color:'
+    '"#fff",width:"76px",height:"30px",borderRadius:"6px",gap:"5px",'
+    'fontSize:"14px",fontWeight:600,flexShrink:0},children:[(0,_je.jsx)'
+    '("svg",{xmlns:"http://www.w3.org/2000/svg",viewBox:"0 0 24 24",'
+    'width:"16",height:"16",fill:"currentColor","aria-hidden":"true",'
+    'children:(0,_je.jsx)("path",{d:"M17 3H5a2 2 0 0 0-2 2v14a2 '
+    '2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM7 5h8v4H7V5zm5 14a3 '
+    '3 0 1 1 0-6 3 3 0 0 1 0 6z"})}),"保存"]})]}):null}'
 ).encode("utf-8")
+
+ORIGINAL_CONTAINER_LAYOUT = b'style:this.defineContainerHeight(),children:['
+PATCHED_CONTAINER_LAYOUT = (
+    b'style:Object.assign({},this.defineContainerHeight(),'
+    b'{display:"flex",flexDirection:"column"}),children:['
+)
+ORIGINAL_GRID_CHILD = (
+    b'(0,_je.jsx)(Sb,{onGridReady:e=>this.onGridReady(e),'
+    b'gridOptions:this.state.gridOptions})'
+)
+PATCHED_GRID_CHILD = (
+    b'(0,_je.jsx)("div",{style:{flex:"1 1 auto",minHeight:0},children:'
+    b'(0,_je.jsx)(Sb,{onGridReady:e=>this.onGridReady(e),'
+    b'gridOptions:this.state.gridOptions})})'
+)
 
 
 def sha256_bytes(content: bytes) -> str:
@@ -94,7 +116,25 @@ def apply_exact_patch(content: bytes) -> bytes:
     with_toolbar = (
         content[:toolbar_start] + PATCHED_TOOLBAR + content[toolbar_end:]
     )
-    return with_toolbar.replace(ORIGINAL_HANDLER, PATCHED_HANDLER, 1)
+    patched = with_toolbar.replace(ORIGINAL_HANDLER, PATCHED_HANDLER, 1)
+
+    for label, original, replacement in (
+        (
+            "grid container layout",
+            ORIGINAL_CONTAINER_LAYOUT,
+            PATCHED_CONTAINER_LAYOUT,
+        ),
+        ("grid child wrapper", ORIGINAL_GRID_CHILD, PATCHED_GRID_CHILD),
+    ):
+        match_count = patched.count(original)
+        if match_count != 1:
+            raise RuntimeError(
+                f"{label} match count must be exactly 1; found {match_count}"
+            )
+        if patched.count(replacement):
+            raise RuntimeError(f"Patched {label} is already present unexpectedly")
+        patched = patched.replace(original, replacement, 1)
+    return patched
 
 
 def patch_bundle(source_dir: Path) -> dict[str, str | bool]:
@@ -112,6 +152,8 @@ def patch_bundle(source_dir: Path) -> dict[str, str | bool]:
             or original.count(ORIGINAL_HANDLER) != 0
             or original.count(PATCHED_TOOLBAR) != 1
             or original.count(TOOLBAR_START) != 1
+            or original.count(PATCHED_CONTAINER_LAYOUT) != 1
+            or original.count(PATCHED_GRID_CHILD) != 1
         ):
             raise RuntimeError(
                 "Bundle has patched hash but handler contents are inconsistent"

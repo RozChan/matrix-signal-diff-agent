@@ -4,10 +4,11 @@ Upstream compiled GridToolBar behavior:
 - Manual Update, fullscreen, CSV download, and search controls.
 - Toolbar hidden until the grid is hovered.
 
-Project-local manual.2 replacement:
+Project-local manual.3 replacement:
 
-- Render exactly one save button when Manual mode is enabled.
-- Keep the button permanently visible at the top-right of the grid.
+- Render a fixed action bar above the AG Grid column headers when Manual mode is enabled.
+- Keep one red 保存 button on the right and an instruction on the left.
+- Reserve layout height so the action bar never covers pinned columns or headers.
 - Use a red background, white save icon, and Chinese title/aria-label 保存修改.
 - Do not render collapse, drag, fullscreen, search, or download controls.
 

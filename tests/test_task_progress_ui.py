@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 import json
 import sys
@@ -254,6 +255,11 @@ def test_manual_submission_without_a_real_change_has_no_dirty_rows() -> None:
     state_items = {"a": {"field_reviews": {"单位": {"result": ""}}}}
     assert capture_grid_changes(source, source, state_items, drafts, set()) == set()
     assert drafts == {}
+
+
+def test_manual_submission_without_changes_has_no_persistent_info_banner() -> None:
+    source = inspect.getsource(review_table_ui.render_compact_review)
+    assert "没有需要保存的修改" not in source
 
 
 def test_editor_change_back_to_saved_value_clears_dirty_row() -> None:

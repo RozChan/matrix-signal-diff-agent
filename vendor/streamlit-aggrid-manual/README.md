@@ -17,15 +17,15 @@ PyPI source distribution for the matrix review application.
 - Original bundle SHA256:
   `35b1e81df4820c9ec69fe96c95473cd28af2add8b84d997b0b1093b6b3538d10`
 - Patched bundle SHA256:
-  `986a070501f6bc75b23d019876a7d654e086590742ffae267d1ad7ab2ff8481d`
+  `a892399205a5547613854f847a362e7a3f375deb597e6c9434d655c757c01adb`
 - Local wheel SHA256:
-  `1d285af322894f8ccde11653cab15370a7c08c97ae4586447ed248c3927c5d4e`
+  `95a2ba1153bb1fb2317e4a46a2b7c8672f226d8525555075ddfa6d69f31c1173`
 
 The sdist contains the Python sources, compiled frontend, and source map, but
 not the complete TypeScript build workspace. `upstream/` remains byte-for-byte
 equivalent to the extracted sdist. The build helper copies it to an isolated
 temporary directory, applies the reviewed compiled-artifact patch, changes the
-package version to `1.1.9+manual.2`, and builds a wheel.
+package version to `1.1.9+manual.3`, and builds a wheel.
 
 ## Patch purpose
 
@@ -35,11 +35,12 @@ component's existing `returnGridValue()` collector with event name
 `manualUpdate`. The existing collector continues to call
 `Streamlit.setComponentValue()`.
 
-The `manual.2` patch also replaces the compiled toolbar with one permanently
-visible red save button. Its title and accessible label are both `保存修改`,
-and it uses a white save icon. Collapse, drag, fullscreen, search, and CSV
-download controls are not rendered. The Manual handler and collector pipeline
-remain unchanged from `manual.1`.
+The `manual.3` patch replaces the compiled floating toolbar with a fixed action
+bar above the AG Grid column headers. The action bar participates in layout and
+therefore cannot cover the right-pinned columns. It contains a short instruction
+and one red `保存` button with a white save icon; its title and accessible label
+are both `保存修改`. Collapse, drag, fullscreen, search, and CSV download controls
+are not rendered. The Manual handler and collector pipeline remain unchanged.
 
 The patch is guarded by the original bundle SHA256, an exact single-match check
 for the Manual handler, and unique toolbar boundaries plus the reviewed toolbar

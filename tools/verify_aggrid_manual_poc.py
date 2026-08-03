@@ -103,7 +103,7 @@ def run_browser(browser_type, executable: Path, url: str) -> dict[str, Any]:
         "consecutive_submit": {},
     }
 
-    # The manual.2 toolbar is always visible and contains only the save button.
+    # The manual.3 action bar reserves its own row above the grid headers.
     toolbar = frame.locator(".grid-toolbar")
     toolbar.wait_for(state="visible", timeout=5_000)
     save_button = toolbar.locator(
@@ -111,6 +111,11 @@ def run_browser(browser_type, executable: Path, url: str) -> dict[str, Any]:
     )
     if toolbar.locator("button").count() != 1 or save_button.count() != 1:
         raise AssertionError("Toolbar must contain exactly one save button")
+    instruction = toolbar.get_by_text("修改人工确认后请保存", exact=True)
+    if instruction.count() != 1:
+        raise AssertionError("Action-bar instruction was not rendered")
+    if save_button.inner_text().strip() != "保存":
+        raise AssertionError("Save button text must be 保存")
     old_toolbar_controls = frame.locator(
         '[title="Collapse Toolbar"], [title="Expand Toolbar"], '
         '[title="Drag Toolbar"], [title="Toggle Fullscreen View"], '
@@ -119,9 +124,16 @@ def run_browser(browser_type, executable: Path, url: str) -> dict[str, Any]:
     )
     if old_toolbar_controls.count() != 0:
         raise AssertionError("Legacy toolbar controls are still rendered")
-    save_style = save_button.evaluate(
+    toolbar_style = toolbar.evaluate(
         "element => { const style = getComputedStyle(element); "
-        "return { backgroundColor: style.backgroundColor, color: style.color }; }"
+        "return { position: style.position, height: style.height }; }"
+    )
+    if toolbar_style["position"] != "relative":
+        raise AssertionError(f"Action bar is still floating: {toolbar_style}")
+    save_style = save_button.evaluate(
+        "element => { const style = getComputedStyle(element); return { "
+        "backgroundColor: style.backgroundColor, color: style.color, "
+        "width: style.width, height: style.height }; }"
     )
     if save_style["backgroundColor"] != "rgb(211, 47, 47)":
         raise AssertionError(f"Unexpected save background: {save_style}")
@@ -129,13 +141,31 @@ def run_browser(browser_type, executable: Path, url: str) -> dict[str, Any]:
         raise AssertionError(f"Unexpected save icon color: {save_style}")
     if save_button.locator('svg[aria-hidden="true"] path').count() != 1:
         raise AssertionError("White save icon was not rendered")
+    toolbar_box = toolbar.bounding_box()
+    header_box = frame.locator(".ag-header").bounding_box()
+    if not toolbar_box or not header_box:
+        raise AssertionError("Could not measure action bar and grid header")
+    toolbar_bottom = toolbar_box["y"] + toolbar_box["height"]
+    if toolbar_bottom > header_box["y"] + 1:
+        raise AssertionError(
+            f"Action bar overlaps grid header: {toolbar_box=} {header_box=}"
+        )
     evidence["toolbar"] = {
         "visible_without_hover": save_button.is_visible(),
         "button_count": toolbar.locator("button").count(),
+        "instruction": instruction.inner_text(),
+        "button_text": save_button.inner_text().strip(),
         "title": save_button.get_attribute("title"),
         "aria_label": save_button.get_attribute("aria-label"),
+        "position": toolbar_style["position"],
+        "height": toolbar_style["height"],
+        "toolbar_bottom": toolbar_bottom,
+        "header_top": header_box["y"],
+        "overlaps_header": False,
         "background_color": save_style["backgroundColor"],
         "icon_color": save_style["color"],
+        "button_width": save_style["width"],
+        "button_height": save_style["height"],
         "legacy_control_count": old_toolbar_controls.count(),
     }
 

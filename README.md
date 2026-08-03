@@ -894,7 +894,7 @@ python tools/test_confluence_connection.py --test-url "https://yfconfluence.mych
 
 ### 人工审核表格与历史结论
 
-信号值描述和单位两个人工审核表默认使用项目内固定 wheel 提供的 AG Grid Manual 模式。用户在当前表修改一项或多项后，点击表格右上角常驻的红色 `保存修改` 按钮；组件会先结束正在编辑的单元格，再通过现有 collector 将包含隐藏 `row_id` 的完整数据返回 Python，并立即复用既有审核锁、revision 校验、JSON 保存和历史结论写入链路。两个表使用独立组件 key、草稿、未保存行和错误状态，排序、筛选、分页不会改变按 `row_id` 保存的结果。
+信号值描述和单位两个人工审核表默认使用项目内固定 wheel 提供的 AG Grid Manual 模式。每张表的列标题上方都有一条独立操作栏，用户修改一项或多项后点击右侧红色 `保存` 按钮；组件会先结束正在编辑的单元格，再通过现有 collector 将包含隐藏 `row_id` 的完整数据返回 Python，并立即复用既有审核锁、revision 校验、JSON 保存和历史结论写入链路。两个表使用独立组件 key、草稿、未保存行和错误状态，排序、筛选、分页不会改变按 `row_id` 保存的结果。Manual提交没有真实变化时保持静默，不显示持久提示。
 
 部署时使用以下环境变量选择编辑器；同一页面只会渲染一种模式：
 
@@ -910,7 +910,7 @@ REVIEW_EDITOR_MODE=data_editor
 
 回退模式仍显示每张表自己的“保存修改”按钮，并使用相同后端。普通页面不提供模式切换控件。可临时设置 `REVIEW_GRID_DEBUG=true`，在审核表下方查看不含凭据的同步诊断；默认关闭。
 
-项目依赖固定到 `vendor/wheels/streamlit_aggrid-1.1.9+manual.2-py3-none-any.whl`，补丁来源、哈希和重建方法记录在 `vendor/streamlit-aggrid-manual/README.md`。隔离 POC 可用下列命令启动：
+项目依赖固定到 `vendor/wheels/streamlit_aggrid-1.1.9+manual.3-py3-none-any.whl`，补丁来源、哈希和重建方法记录在 `vendor/streamlit-aggrid-manual/README.md`。隔离 POC 可用下列命令启动：
 
 ```bat
 python -m streamlit run tools\aggrid_manual_poc.py --server.port 8510
