@@ -62,9 +62,7 @@ def choose_review(frame: FrameLocator, row_id: str, value: str) -> None:
 
 
 def click_manual(frame: FrameLocator) -> None:
-    grid = frame.locator("#gridContainer")
-    grid.hover()
-    manual = frame.locator('button[title="Manual Update"]')
+    manual = frame.locator('button[title="保存修改"][aria-label="保存修改"]')
     manual.wait_for(state="visible", timeout=5_000)
     manual.click()
 
@@ -94,6 +92,7 @@ def run_browser(browser_type, executable: Path, url: str) -> dict[str, Any]:
 
     evidence: dict[str, Any] = {
         "browser_executable": str(executable),
+        "toolbar": {},
         "page_1": {},
         "page_2": {},
         "sorting": {},
@@ -102,6 +101,42 @@ def run_browser(browser_type, executable: Path, url: str) -> dict[str, Any]:
         "multirow": {},
         "change_back": {},
         "consecutive_submit": {},
+    }
+
+    # The manual.2 toolbar is always visible and contains only the save button.
+    toolbar = frame.locator(".grid-toolbar")
+    toolbar.wait_for(state="visible", timeout=5_000)
+    save_button = toolbar.locator(
+        'button[title="保存修改"][aria-label="保存修改"]'
+    )
+    if toolbar.locator("button").count() != 1 or save_button.count() != 1:
+        raise AssertionError("Toolbar must contain exactly one save button")
+    old_toolbar_controls = frame.locator(
+        '[title="Collapse Toolbar"], [title="Expand Toolbar"], '
+        '[title="Drag Toolbar"], [title="Toggle Fullscreen View"], '
+        '[title="Download as CSV"], [title="Quick Search"], '
+        'input[placeholder="Search..."]'
+    )
+    if old_toolbar_controls.count() != 0:
+        raise AssertionError("Legacy toolbar controls are still rendered")
+    save_style = save_button.evaluate(
+        "element => { const style = getComputedStyle(element); "
+        "return { backgroundColor: style.backgroundColor, color: style.color }; }"
+    )
+    if save_style["backgroundColor"] != "rgb(211, 47, 47)":
+        raise AssertionError(f"Unexpected save background: {save_style}")
+    if save_style["color"] != "rgb(255, 255, 255)":
+        raise AssertionError(f"Unexpected save icon color: {save_style}")
+    if save_button.locator('svg[aria-hidden="true"] path').count() != 1:
+        raise AssertionError("White save icon was not rendered")
+    evidence["toolbar"] = {
+        "visible_without_hover": save_button.is_visible(),
+        "button_count": toolbar.locator("button").count(),
+        "title": save_button.get_attribute("title"),
+        "aria_label": save_button.get_attribute("aria-label"),
+        "background_color": save_style["backgroundColor"],
+        "icon_color": save_style["color"],
+        "legacy_control_count": old_toolbar_controls.count(),
     }
 
     # Static grid behavior and first-page editing.

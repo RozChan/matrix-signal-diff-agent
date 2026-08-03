@@ -26,7 +26,7 @@ UPSTREAM_SOURCE = (
 )
 DEFAULT_OUTPUT = PROJECT_ROOT / "vendor" / "wheels"
 UPSTREAM_VERSION = 'version = "1.1.9"'
-LOCAL_VERSION = 'version = "1.1.9+manual.1"'
+LOCAL_VERSION = 'version = "1.1.9+manual.2"'
 
 
 def prepare_source(upstream: Path, destination: Path) -> None:
@@ -64,7 +64,7 @@ def build_wheel(upstream: Path, output: Path) -> None:
     with tempfile.TemporaryDirectory(
         prefix="streamlit_aggrid_manual_build_"
     ) as temporary:
-        source = Path(temporary) / "streamlit_aggrid-1.1.9+manual.1"
+        source = Path(temporary) / "streamlit_aggrid-1.1.9+manual.2"
         prepare_source(upstream, source)
         subprocess.run(
             [
