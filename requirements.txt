@@ -1,5 +1,5 @@
 streamlit
-./vendor/wheels/streamlit_aggrid-1.1.9+manual.2-py3-none-any.whl
+./vendor/wheels/streamlit_aggrid-1.1.9+manual.3-py3-none-any.whl
 openpyxl
 pandas
 requests

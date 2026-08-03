@@ -650,7 +650,6 @@ def render_compact_review(task_dir, review_dir, task_id: str, items: list[dict[s
         if submitted:
             field_dirty_key = field_dirty_state_key(dirty_key, field_name)
             if not st.session_state.get(field_dirty_key):
-                st.info(f"{field_name}没有需要保存的修改。")
                 continue
             try:
                 field_drafts_key = field_drafts_state_key(drafts_key, field_name)

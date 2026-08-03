@@ -7,7 +7,10 @@ import pytest
 from tools.patch_streamlit_aggrid_manual import (
     BUNDLE_RELATIVE_PATH,
     ORIGINAL_HANDLER,
+    ORIGINAL_CONTAINER_LAYOUT,
     ORIGINAL_SHA256,
+    PATCHED_CONTAINER_LAYOUT,
+    PATCHED_GRID_CHILD,
     PATCHED_HANDLER,
     PATCHED_SHA256,
     PATCHED_TOOLBAR,
@@ -79,6 +82,10 @@ def test_patch_produces_reviewed_hash(tmp_path: Path) -> None:
     assert patched.count(PATCHED_HANDLER) == 1
     assert patched.count(PATCHED_TOOLBAR) == 1
     assert patched.count("保存修改".encode("utf-8")) == 2
+    assert patched.count("修改人工确认后请保存".encode("utf-8")) == 1
+    assert patched.count(PATCHED_CONTAINER_LAYOUT) == 1
+    assert patched.count(PATCHED_GRID_CHILD) == 1
+    assert ORIGINAL_CONTAINER_LAYOUT not in patched
     assert b"Collapse Toolbar" not in patched
     assert b"Toggle Fullscreen View" not in patched
     assert b"Download as CSV" not in patched
