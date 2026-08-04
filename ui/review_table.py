@@ -43,7 +43,7 @@ def aggrid_key(field_name: str, task_id: str, can_edit: bool = True) -> str:
     """Keep stable, independent identities for both Manual AG Grid tables."""
 
     mode = "edit" if can_edit else "view"
-    return f"review-aggrid-manual-v1-{mode}-{field_name}-{task_id}"
+    return f"review-aggrid-manual-v2-{mode}-{field_name}-{task_id}"
 
 
 def review_editor_mode() -> str:
@@ -221,15 +221,23 @@ def save_button_disabled(can_edit: bool, has_changes: bool) -> bool:
 def grid_column_layout(field_name: str) -> dict[str, dict[str, Any]]:
     """Return bounded responsive widths so every business column fits onscreen."""
 
+    signal_flex = 0.9 if field_name == "信号值描述" else 1.2
+    value_flex = 1.6 if field_name == "信号值描述" else 1.0
     return {
         "详情": {"width": 58, "minWidth": 55, "maxWidth": 64},
-        "EEA4.0信号名": {"flex": 0.75, "minWidth": 120, "maxWidth": 175},
-        "EEA5.1信号名": {"flex": 0.75, "minWidth": 120, "maxWidth": 175},
-        f"EEA4.0{field_name}": {"flex": 1, "minWidth": 220},
-        f"EEA5.1{field_name}": {"flex": 1, "minWidth": 220},
-        "AI判断结果": {"flex": 0.55, "minWidth": 100, "maxWidth": 125},
+        "EEA4.0信号名": {"flex": signal_flex, "minWidth": 130},
+        "EEA5.1信号名": {"flex": signal_flex, "minWidth": 130},
+        f"EEA4.0{field_name}": {"flex": value_flex, "minWidth": 240},
+        f"EEA5.1{field_name}": {"flex": value_flex, "minWidth": 240},
+        "AI判断结果": {"flex": 0.65, "minWidth": 105, "maxWidth": 150},
         "人工确认": {"width": 165, "minWidth": 155, "maxWidth": 180},
     }
+
+
+def detail_column_default(editor_mode: str) -> bool | str:
+    """Avoid AG Grid boolean inference while retaining the native fallback checkbox."""
+
+    return False if editor_mode == "data_editor" else ""
 
 
 def description_cell_options() -> dict[str, Any]:
@@ -386,9 +394,7 @@ def _render_field_table_data_editor(field_name: str, task_id: str, items: list[d
         st.info(f"本任务没有{field_name}差异。")
         return False
 
-    # Detail is represented by AG Grid row selection, not an editable boolean.
-    # A non-boolean value avoids an extra disabled checkbox from type inference.
-    grid_rows = [{**row, "详情": ""} for row in rows]
+    grid_rows = [{**row, "详情": detail_column_default("data_editor")} for row in rows]
     frame = pd.DataFrame(grid_rows)
     field_dirty_key = field_dirty_state_key(dirty_key, field_name)
     st.session_state.setdefault(field_dirty_key, [])
@@ -496,7 +502,9 @@ def _render_field_table_aggrid(
         st.info(f"本任务没有{field_name}差异。")
         return False
 
-    grid_rows = [{**row, "详情": False} for row in rows]
+    # AG Grid detail uses row selection; a non-boolean value prevents its
+    # column type inference from adding a second disabled checkbox.
+    grid_rows = [{**row, "详情": detail_column_default("aggrid_manual")} for row in rows]
     frame = pd.DataFrame(grid_rows)
     field_dirty_key = field_dirty_state_key(dirty_key, field_name)
     dirty = set(st.session_state.setdefault(field_dirty_key, []))
