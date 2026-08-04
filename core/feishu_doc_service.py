@@ -289,7 +289,17 @@ def _document_content(task_dir: Path, meta: dict[str, Any], files: dict[str, Pat
         f"- 历史人工复用数量：{int(stats.get('history_reused') or 0)}",
         f"- 本次人工确认数量：{actual_manual_count}",
         f"- 待人工确认数量：{int(stats.get('pending_manual') or 0)}",
-        "- 最终状态：人工审核完成，最终结果已生成",
+        (
+            "- 最终状态：无需新增人工确认，历史人工结论复用完成，最终结果已生成"
+            if actual_manual_count == 0
+            and int(stats.get("pending_manual") or 0) == 0
+            and int(stats.get("history_reused") or 0) > 0
+            else (
+                "- 最终状态：无需新增人工确认，系统判定完成，最终结果已生成"
+                if actual_manual_count == 0 and int(stats.get("pending_manual") or 0) == 0
+                else "- 最终状态：人工审核完成，最终结果已生成"
+            )
+        ),
     ])
     return f"""# EEA4.0与EEA5.1信号差异识别结果
 

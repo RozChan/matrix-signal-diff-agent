@@ -28,7 +28,7 @@ from core.pipeline import OUTPUT_FILENAMES
 from core.result_notifier import build_results_zip
 from core.result_access import allowed_result_files, ensure_result_access, result_token_valid
 from core.notification_router import notify_result_ready
-from core.admin_tasks import admin_system_status, admin_token_valid, cancel_admin_task, create_admin_full_compare, list_admin_tasks, retry_admin_confluence, retry_admin_review_notification, safe_task_dir
+from core.admin_tasks import admin_system_status, admin_token_valid, cancel_admin_task, create_admin_full_compare, list_admin_tasks, retry_admin_auto_finalization, retry_admin_confluence, retry_admin_review_notification, safe_task_dir
 from core.task_progress import allowed_admin_actions, build_task_progress, choose_default_task, status_label, trigger_label
 from core.review_table import pending_review_count
 from core.review_history import history_database_path
@@ -688,6 +688,17 @@ def _show_admin_page() -> None:
                         st.success("审核通知已重新发送。")
                     else:
                         st.error("审核通知发送失败，请检查群机器人配置。")
+                except Exception as exc:  # noqa: BLE001
+                    st.error(str(exc))
+        if row.get("status") == "awaiting_review" and int(row.get("pending_manual_count") or 0) == 0:
+            if st.button("继续生成零待审核任务的最终结果", key=f"admin-retry-auto-finalization-{selected}"):
+                try:
+                    result = retry_admin_auto_finalization(selected)
+                    if result.get("success"):
+                        st.success("最终结果已生成，并已继续执行结果交付。")
+                        st.rerun()
+                    else:
+                        st.error(f"自动生成失败：{result.get('error') or result.get('reason') or '未知错误'}")
                 except Exception as exc:  # noqa: BLE001
                     st.error(str(exc))
         if row.get("result_url"):

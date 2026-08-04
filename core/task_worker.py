@@ -102,7 +102,18 @@ def run_task(task_id: str, enable_ai: bool = True) -> dict[str, Any]:
                 notify_review_ready(task_path)
             except Exception as notification_error:  # noqa: BLE001 - notification must not fail completed processing
                 _update(task_path, review_notification_dispatch_error=str(notification_error))
-        return {"task_id": task_id, "review_url": meta.get("review_url"), "review_stats": review_stats, "ai_stats": ai_stats}
+            finalization: dict[str, Any] = {}
+        else:
+            from core.task_finalization import auto_finalize_if_no_pending
+
+            finalization = auto_finalize_if_no_pending(task_path, notify=True)
+        return {
+            "task_id": task_id,
+            "review_url": meta.get("review_url"),
+            "review_stats": review_stats,
+            "ai_stats": ai_stats,
+            "auto_finalization": finalization,
+        }
     except Exception as exc:  # noqa: BLE001
         _update(task_path, status="failed", current_stage="失败", stage_progress=100, error=str(exc), traceback=traceback.format_exc())
         raise

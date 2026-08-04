@@ -113,7 +113,13 @@ def build_task_progress(task_dir: Path) -> dict[str, Any]:
         "updated_at_display": beijing_time(updated),
         "elapsed": elapsed_text(meta.get("created_at") or meta.get("triggered_at"), meta.get("review_completed_at") if status in TERMINAL_STATUSES else None),
         "current_stage": str(meta.get("current_stage") or "等待状态更新"),
-        "message": str(meta.get("progress_message") or meta.get("message") or meta.get("error") or ""),
+        "message": str(
+            meta.get("progress_message")
+            or meta.get("message")
+            or meta.get("auto_finalization_error")
+            or meta.get("error")
+            or ""
+        ),
         "overall_percent": overall_percent(meta),
         "active": status in ACTIVE_STATUSES,
         "error": str(meta.get("error") or ""),
