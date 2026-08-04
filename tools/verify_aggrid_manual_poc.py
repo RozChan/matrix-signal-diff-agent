@@ -93,6 +93,7 @@ def run_browser(browser_type, executable: Path, url: str) -> dict[str, Any]:
     evidence: dict[str, Any] = {
         "browser_executable": str(executable),
         "toolbar": {},
+        "review_alignment": {},
         "page_1": {},
         "page_2": {},
         "sorting": {},
@@ -181,6 +182,21 @@ def run_browser(browser_type, executable: Path, url: str) -> dict[str, Any]:
         '.ag-center-cols-container .ag-row[row-id="poc-row-01"] '
         '.ag-cell[col-id="EEA4.0字段值"]'
     ).inner_text()
+    first_review_cell = review_cell(frame, "poc-row-01")
+    display_alignment = first_review_cell.evaluate(
+        "element => { const style = getComputedStyle(element); "
+        "const rect = element.getBoundingClientRect(); return { "
+        "display: style.display, alignItems: style.alignItems, "
+        "justifyContent: style.justifyContent, "
+        "center: rect.top + rect.height / 2 }; }"
+    )
+    if display_alignment != {
+        "display": "flex",
+        "alignItems": "center",
+        "justifyContent": "flex-start",
+        "center": display_alignment["center"],
+    }:
+        raise AssertionError(f"Unexpected review-cell alignment: {display_alignment}")
     choose_review(frame, "poc-row-01", SAME)
 
     # Re-open the just-modified cell and click Manual while an inline editor is
@@ -190,6 +206,29 @@ def run_browser(browser_type, executable: Path, url: str) -> dict[str, Any]:
     inline_before_manual = frame.locator(".ag-cell-inline-editing").count()
     if inline_before_manual != 1:
         raise AssertionError("Expected exactly one active inline editor")
+    active_combo = active_cell.locator('[role="combobox"]')
+    editor_alignment = active_combo.evaluate(
+        "element => { const style = getComputedStyle(element); "
+        "const rect = element.getBoundingClientRect(); return { "
+        "textAlign: style.textAlign, center: rect.top + rect.height / 2 }; }"
+    )
+    center_shift = abs(
+        float(display_alignment["center"]) - float(editor_alignment["center"])
+    )
+    if editor_alignment["textAlign"] != "left" or center_shift > 1:
+        raise AssertionError(
+            "Review selector shifts when editing: "
+            f"{display_alignment=} {editor_alignment=}"
+        )
+    evidence["review_alignment"] = {
+        "display": display_alignment["display"],
+        "align_items": display_alignment["alignItems"],
+        "justify_content": display_alignment["justifyContent"],
+        "editor_text_align": editor_alignment["textAlign"],
+        "display_center": display_alignment["center"],
+        "editor_center": editor_alignment["center"],
+        "center_shift_pixels": center_shift,
+    }
     click_manual(frame)
     first = wait_for_submit(page, 1)
     assert first["event_name"] == "manualUpdate"

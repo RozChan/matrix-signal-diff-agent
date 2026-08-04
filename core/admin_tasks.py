@@ -53,6 +53,11 @@ def list_admin_tasks(limit: int = 50) -> list[dict[str, Any]]:
     rows = []
     for tdir, meta in scan_task_metas():
         created_at = meta.get("created_at", meta.get("triggered_at", ""))
+        ai_total = int(meta.get("ai_required_signal_count") or 0)
+        ai_done = int(meta.get("ai_completed_signal_count") or 0)
+        ai_failed = int(meta.get("ai_failed_signal_count") or 0)
+        if meta.get("status") in {"ai_review_done", "generating_review", "awaiting_review", "reviewing", "final_exported", "delivered"}:
+            ai_done = min(ai_total, ai_done + ai_failed) if ai_total else ai_done
         rows.append({
             "task_id": meta.get("task_id", tdir.name),
             "trigger_source": meta.get("trigger_source", ""),
@@ -63,7 +68,7 @@ def list_admin_tasks(limit: int = 50) -> list[dict[str, Any]]:
             "progress": int(meta.get("stage_progress") or 0),
             "input_40_count": int(meta.get("input_40_count") or 0),
             "input_51_count": int(meta.get("input_51_count") or 0),
-            "ai_progress": f"{int(meta.get('ai_completed_signal_count') or 0)}/{int(meta.get('ai_required_signal_count') or 0)}",
+            "ai_progress": f"{ai_done}/{ai_total}",
             "review_url": meta.get("review_url", ""),
             "result_url": meta.get("result_url", ""),
             "result_delivery_status": meta.get("result_delivery_status", ""),

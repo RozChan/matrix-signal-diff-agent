@@ -84,12 +84,24 @@ def run_task(task_id: str, enable_ai: bool = True) -> dict[str, Any]:
             notification_status="pending",
             signal_total=len(review_items),
             ai_required_signal_count=int(ai_stats.get("ai_called_count") or 0),
-            ai_completed_signal_count=int(ai_stats.get("ai_reviewed_count") or 0),
+            # Every attempted model call is finished at this point, including
+            # calls that failed and were converted into manual-review items.
+            ai_completed_signal_count=int(ai_stats.get("ai_called_count") or 0),
             ai_failed_signal_count=int(ai_stats.get("ai_failed_count") or 0),
             history_reused_count=int(review_stats.get("history_reused") or 0),
             initial_pending_manual_count=int(review_stats.get("pending_manual") or 0),
             pending_manual_count=int(review_stats.get("pending_manual") or 0),
         )
+        # Dispatch from the durable worker as well as the parent-process
+        # monitor.  The notification router is idempotent, so this closes the
+        # gap caused by a Streamlit rerun/restart without sending duplicates.
+        if int(review_stats.get("pending_manual") or 0) > 0:
+            from core.notification_router import notify_review_ready
+
+            try:
+                notify_review_ready(task_path)
+            except Exception as notification_error:  # noqa: BLE001 - notification must not fail completed processing
+                _update(task_path, review_notification_dispatch_error=str(notification_error))
         return {"task_id": task_id, "review_url": meta.get("review_url"), "review_stats": review_stats, "ai_stats": ai_stats}
     except Exception as exc:  # noqa: BLE001
         _update(task_path, status="failed", current_stage="失败", stage_progress=100, error=str(exc), traceback=traceback.format_exc())

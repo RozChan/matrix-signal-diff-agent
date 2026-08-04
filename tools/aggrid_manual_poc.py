@@ -83,13 +83,21 @@ def grid_options(frame: pd.DataFrame) -> dict[str, Any]:
                     return {
                         color: "#137333",
                         backgroundColor: "#e6f4ea",
-                        fontWeight: "700"
+                        fontWeight: "700",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "flex-start",
+                        lineHeight: "normal"
                     };
                 }
                 return {
                     color: "#b3261e",
                     backgroundColor: "#fce8e6",
-                    fontWeight: "700"
+                    fontWeight: "700",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "flex-start",
+                    lineHeight: "normal"
                 };
             }
             """
