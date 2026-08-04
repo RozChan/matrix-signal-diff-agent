@@ -6,6 +6,7 @@ import json
 import html
 import os
 import re
+import shutil
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -20,10 +21,11 @@ from .task_lock import get_task_lock
 
 ATTACHMENT_ORDER = ("full_40", "full_51", "compare_final")
 ATTACHMENT_LABELS = {
-    "full_40": "EEA4.0全量信号清单",
-    "full_51": "EEA5.1全量信号清单",
-    "compare_final": "最终信号对比结果",
+    "full_40": "EEA4.0全量信号矩阵清单.xlsx",
+    "full_51": "EEA5.1全量信号矩阵清单.xlsx",
+    "compare_final": "人工审核后最终差异结果.xlsx",
 }
+DELIVERY_STAGING_DIR = "feishu_delivery_attachments"
 
 
 class FeishuDocumentError(RuntimeError):
@@ -40,7 +42,7 @@ def _enabled() -> bool:
 
 def _redact(text: str) -> str:
     cleaned = str(text or "")
-    for name in ("FEISHU_CUSTOM_BOT_WEBHOOK", "FEISHU_CUSTOM_BOT_SECRET"):
+    for name in ("FEISHU_CUSTOM_BOT_WEBHOOK", "FEISHU_CUSTOM_BOT_SECRET", "FEISHU_RESULT_FOLDER_TOKEN"):
         value = os.getenv(name, "").strip()
         if value:
             cleaned = cleaned.replace(value, f"<{name.lower()}-redacted>")
@@ -235,6 +237,26 @@ def _data_row_count(path: Path) -> int:
         workbook.close()
 
 
+def _staged_attachment(task_dir: Path, key: str, source: Path) -> Path:
+    """Copy one registered result to its stable Feishu display name."""
+
+    if key not in ATTACHMENT_LABELS:
+        raise FeishuDocumentError("wrong_compare_result_file", f"未知交付附件：{key}")
+    staging_dir = (Path(task_dir).resolve() / "bot" / DELIVERY_STAGING_DIR).resolve()
+    expected_parent = (Path(task_dir).resolve() / "bot").resolve()
+    if staging_dir.parent != expected_parent:
+        raise FeishuDocumentError("wrong_compare_result_file", "飞书交付暂存路径越界")
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    target = staging_dir / ATTACHMENT_LABELS[key]
+    try:
+        shutil.copy2(source, target)
+    except OSError as exc:
+        raise FeishuDocumentError("attachment_stage_failed", f"准备飞书附件失败：{target.name}：{exc}") from exc
+    if not target.is_file() or target.stat().st_size != source.stat().st_size:
+        raise FeishuDocumentError("attachment_stage_failed", f"准备飞书附件失败：{target.name}")
+    return target
+
+
 def _document_content(task_dir: Path, meta: dict[str, Any], files: dict[str, Path]) -> str:
     review_dir = Path(task_dir) / "review"
     stats = compute_review_stats(load_review_items(review_dir), load_review_state(review_dir))
@@ -253,13 +275,21 @@ def _document_content(task_dir: Path, meta: dict[str, Any], files: dict[str, Pat
         f"- EEA5.1全量信号数量：{_data_row_count(files['full_51'])}",
         f"- 历史版本跳过数量：{int(meta.get('full_compare_skipped_history_count') or 0)}",
     ])
+    actual_manual_count = max(0, int(stats.get("manual_confirmed") or 0) - int(stats.get("history_reused") or 0))
+    initial_pending_count = int(
+        meta.get("initial_pending_manual_count")
+        if meta.get("initial_pending_manual_count") is not None
+        else int(stats.get("pending_manual") or 0) + actual_manual_count
+    )
     result_lines = "\n".join([
+        f"- 初始待人工确认数量：{initial_pending_count}",
         f"- 系统判定不同数量：{int(stats.get('system_different') or 0)}",
         f"- 人工确认不同数量：{int(stats.get('manual_different') or 0)}",
         f"- 人工确认相同数量：{int(stats.get('manual_same') or 0)}",
         f"- 历史人工复用数量：{int(stats.get('history_reused') or 0)}",
-        f"- 本次人工确认数量：{max(0, int(stats.get('manual_confirmed') or 0) - int(stats.get('history_reused') or 0))}",
+        f"- 本次人工确认数量：{actual_manual_count}",
         f"- 待人工确认数量：{int(stats.get('pending_manual') or 0)}",
+        "- 最终状态：人工审核完成，最终结果已生成",
     ])
     return f"""# EEA4.0与EEA5.1信号差异识别结果
 
@@ -278,9 +308,9 @@ def _document_content(task_dir: Path, meta: dict[str, Any], files: dict[str, Pat
 - 最终结果以本次任务保存的人工结论为准。
 
 ## 五、结果附件
-1. EEA4.0全量信号清单
-2. EEA5.1全量信号清单
-3. 最终信号对比结果
+1. {ATTACHMENT_LABELS['full_40']}
+2. {ATTACHMENT_LABELS['full_51']}
+3. {ATTACHMENT_LABELS['compare_final']}
 """
 
 
@@ -289,7 +319,16 @@ def _default_delivery(files: dict[str, Path]) -> dict[str, Any]:
         "status": "not_started", "document_id": "", "document_url": "", "document_title": "",
         "created_at": "", "updated_at": "", "attempt_count": 0, "last_error": "", "error_type": "",
         "attachments": {
-            key: {"status": "pending", "file_path": str(files[key]), "block_id": "", "file_token": "", "attempt_count": 0, "last_error": ""}
+            key: {
+                "status": "pending",
+                "file_path": str(files[key]),
+                "display_name": ATTACHMENT_LABELS[key],
+                "block_id": "",
+                "file_token": "",
+                "attempt_count": 0,
+                "last_error": "",
+                "error_type": "",
+            }
             for key in ATTACHMENT_ORDER
         },
         "result_notification": {"status": "pending", "notified_at": "", "attempt_count": 0, "last_error": ""},
@@ -307,7 +346,33 @@ def _normalized_delivery(existing: dict[str, Any], files: dict[str, Path]) -> di
 
 def _save_delivery(task_dir: Path, delivery: dict[str, Any]) -> None:
     delivery["updated_at"] = utc_now_iso()
-    update_task_meta(task_dir, feishu_delivery=delivery)
+    status = str(delivery.get("status") or "not_started")
+    summary_status = {
+        "not_started": "pending",
+        "creating": "sending",
+        "uploading": "sending",
+        "partial_failed": "failed",
+        "failed": "failed",
+        "ready": "ready",
+        "delivered": "delivered",
+    }.get(status, status)
+    update_task_meta(
+        task_dir,
+        feishu_delivery=delivery,
+        result_delivery_status=summary_status,
+        delivery_error=str(delivery.get("last_error") or ""),
+    )
+
+
+def _notify_current_result_status(task_dir: Path) -> None:
+    """Best-effort custom-bot notice; delivery errors remain independently retryable."""
+
+    try:
+        from .notification_router import notify_result_ready
+
+        notify_result_ready(task_dir)
+    except Exception:  # noqa: BLE001 - a notification failure must not replace delivery state
+        return
 
 
 def _acquire_process_claim(task_dir: Path) -> Path:
@@ -343,7 +408,9 @@ def publish_task_result_document(task_dir: str | Path, *, notify: bool = True) -
             delivery["last_error"] = ""
             _save_delivery(tdir, delivery)
         if not delivery.get("document_id"):
-            title = delivery.get("document_title") or _safe_title(f"{_beijing_stamp(str(meta.get('review_completed_at') or ''))}_{files['compare_final'].stem}")
+            title = delivery.get("document_title") or _safe_title(
+                f"{_beijing_stamp(str(meta.get('review_completed_at') or ''))}_信号矩阵全量对比最终结果"
+            )
             created = create_feishu_document(title, _document_content(tdir, meta, files))
             delivery.update({
                 "document_id": created["document_id"], "document_url": created["document_url"],
@@ -358,13 +425,23 @@ def publish_task_result_document(task_dir: str | Path, *, notify: bool = True) -
             attachment["attempt_count"] = int(attachment.get("attempt_count") or 0) + 1
             _save_delivery(tdir, delivery)
             try:
-                uploaded = insert_file_attachment(str(delivery["document_id"]), files[key])
+                upload_path = _staged_attachment(tdir, key, files[key])
+                uploaded = insert_file_attachment(str(delivery["document_id"]), upload_path)
             except FeishuDocumentError as exc:
                 attachment.update({"status": "failed", "last_error": str(exc), "error_type": exc.error_type, "last_stdout": exc.stdout, "last_stderr": exc.stderr})
                 delivery.update({"status": "partial_failed", "last_error": str(exc), "error_type": exc.error_type, "last_stdout": exc.stdout, "last_stderr": exc.stderr})
                 _save_delivery(tdir, delivery)
+                if notify:
+                    _notify_current_result_status(tdir)
                 return {"success": False, **delivery}
-            attachment.update({"status": "success", "block_id": uploaded["block_id"], "file_token": uploaded["file_token"], "last_error": "", "error_type": ""})
+            attachment.update({
+                "status": "success",
+                "display_name": ATTACHMENT_LABELS[key],
+                "block_id": uploaded["block_id"],
+                "file_token": uploaded["file_token"],
+                "last_error": "",
+                "error_type": "",
+            })
             _save_delivery(tdir, delivery)
         delivery.update({"status": "ready", "last_error": "", "error_type": ""})
         _save_delivery(tdir, delivery)
@@ -377,6 +454,8 @@ def publish_task_result_document(task_dir: str | Path, *, notify: bool = True) -
         delivery = dict(meta.get("feishu_delivery") or {})
         delivery.update({"status": "failed", "last_error": str(exc), "error_type": exc.error_type, "last_stdout": exc.stdout, "last_stderr": exc.stderr})
         _save_delivery(tdir, delivery)
+        if notify:
+            _notify_current_result_status(tdir)
         return {"success": False, **delivery}
     finally:
         claim.unlink(missing_ok=True)
