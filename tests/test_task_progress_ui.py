@@ -56,6 +56,25 @@ def test_progress_uses_real_counts_ai_and_status_percentages(tmp_path: Path) -> 
     assert build_task_progress(tdir)["overall_percent"] == 100
 
 
+def test_completed_ai_progress_counts_failed_calls_as_processed(tmp_path: Path) -> None:
+    tdir = make_task(tmp_path)
+    update_task_meta(
+        tdir,
+        status="awaiting_review",
+        ai_required_signal_count=25,
+        ai_completed_signal_count=21,
+        ai_failed_signal_count=4,
+    )
+    ai = build_task_progress(tdir)["ai"]
+    assert ai == {
+        "total": 25,
+        "completed": 25,
+        "failed": 4,
+        "percent": 100.0,
+        "current_signal": "",
+    }
+
+
 def test_progress_stage_floor_prevents_worker_restart_regression() -> None:
     assert overall_percent({"status": "running", "current_stage": "下载5.1 Confluence矩阵", "stage_progress": 6}) == 25
     assert overall_percent({"status": "running", "current_stage": "文件接收与校验", "stage_progress": 5}) == 35
@@ -203,6 +222,9 @@ def test_manual_grid_options_keep_identity_hidden_and_full_grid_features() -> No
     assert columns["人工确认"]["pinned"] == "right"
     assert columns["人工确认"]["editable"] is True
     assert columns["人工确认"]["cellEditor"] == "agSelectCellEditor"
+    confirm_style = columns["人工确认"]["cellStyle"].js_code
+    assert 'alignItems: "center"' in confirm_style
+    assert 'justifyContent: "flex-start"' in confirm_style
     assert columns["详情"]["pinned"] == "right"
     assert options["columnDefs"][-1]["field"] == "详情"
 
@@ -260,6 +282,11 @@ def test_manual_submission_without_a_real_change_has_no_dirty_rows() -> None:
 def test_manual_submission_without_changes_has_no_persistent_info_banner() -> None:
     source = inspect.getsource(review_table_ui.render_compact_review)
     assert "没有需要保存的修改" not in source
+
+
+def test_history_reuse_message_does_not_reference_missing_view_all_action() -> None:
+    source = inspect.getsource(review_table_ui.render_compact_review)
+    assert "查看全部" not in source
 
 
 def test_editor_change_back_to_saved_value_clears_dirty_row() -> None:

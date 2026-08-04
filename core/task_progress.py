@@ -96,6 +96,11 @@ def build_task_progress(task_dir: Path) -> dict[str, Any]:
     updated = meta.get("updated_at") or meta.get("review_completed_at") or meta.get("triggered_at") or meta.get("created_at")
     ai_total = int(meta.get("ai_required_signal_count") or meta.get("signal_total") or 0)
     ai_done = int(meta.get("ai_completed_signal_count") or 0)
+    ai_failed = int(meta.get("ai_failed_signal_count") or 0)
+    if status in {"ai_review_done", "generating_review", "awaiting_review", "reviewing", "final_exported", "delivered"}:
+        # Older task metadata counted successful AI calls only.  Failed calls
+        # are still terminally processed and become manual-review items.
+        ai_done = min(ai_total, ai_done + ai_failed) if ai_total else ai_done
     snapshot = {
         "task_id": str(meta.get("task_id") or tdir.name),
         "status": status,
@@ -118,7 +123,7 @@ def build_task_progress(task_dir: Path) -> dict[str, Any]:
         "ai": {
             "total": ai_total,
             "completed": ai_done,
-            "failed": int(meta.get("ai_failed_signal_count") or 0),
+            "failed": ai_failed,
             "percent": round(ai_done * 100 / ai_total, 1) if ai_total else 0,
             "current_signal": str(meta.get("current_signal") or ""),
         },

@@ -50,9 +50,15 @@ def build_task_progress_snapshot(task_dir: Path) -> dict[str, Any]:
     sources51 = [item for item in sources if item.get("version") == "5.1"]
     completed = [item for item in sources if item.get("status") == "completed"]
     failed = [item for item in sources if item.get("status") == "failed"]
+    status = str(meta.get("status") or "")
+    ai_total = int(meta.get("ai_required_signal_count") or meta.get("signal_total") or 0)
+    ai_done = int(meta.get("ai_completed_signal_count") or 0)
+    ai_failed = int(meta.get("ai_failed_signal_count") or 0)
+    if status in {"ai_review_done", "generating_review", "awaiting_review", "reviewing", "final_exported", "delivered"}:
+        ai_done = min(ai_total, ai_done + ai_failed) if ai_total else ai_done
     return {
         "task_id": task_id,
-        "status": meta.get("status", ""),
+        "status": status,
         "current_stage": meta.get("current_stage", ""),
         "stage_progress": int(meta.get("stage_progress") or 0),
         "current_signal": meta.get("current_signal", ""),
@@ -67,9 +73,9 @@ def build_task_progress_snapshot(task_dir: Path) -> dict[str, Any]:
         "confluence_40_completed_source_count": sum(1 for item in sources40 if item.get("status") == "completed"),
         "confluence_51_source_count": len(sources51),
         "confluence_51_completed_source_count": sum(1 for item in sources51 if item.get("status") == "completed"),
-        "ai_required_signal_count": int(meta.get("ai_required_signal_count") or meta.get("signal_total") or 0),
-        "ai_completed_signal_count": int(meta.get("ai_completed_signal_count") or 0),
-        "ai_failed_signal_count": int(meta.get("ai_failed_signal_count") or 0),
+        "ai_required_signal_count": ai_total,
+        "ai_completed_signal_count": ai_done,
+        "ai_failed_signal_count": ai_failed,
         "review_url": meta.get("review_url", ""),
         "error": meta.get("error", ""),
         "updated_at": meta.get("updated_at", ""),

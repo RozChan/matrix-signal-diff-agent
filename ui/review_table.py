@@ -299,13 +299,21 @@ def build_review_grid_options(
                     return {
                         color: "#137333",
                         backgroundColor: "#e6f4ea",
-                        fontWeight: "700"
+                        fontWeight: "700",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "flex-start",
+                        lineHeight: "normal"
                     };
                 }
                 return {
                     color: "#b3261e",
                     backgroundColor: "#fce8e6",
-                    fontWeight: "700"
+                    fontWeight: "700",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "flex-start",
+                    lineHeight: "normal"
                 };
             }
             """
@@ -634,7 +642,7 @@ def render_compact_review(task_dir, review_dir, task_id: str, items: list[dict[s
         f"最后保存：{beijing_time(stats['updated_at'])}"
     )
     if stats["history_reused"]:
-        st.success(f"已按信号名、差异字段及4.0/5.1字段值精确复用 {stats['history_reused']} 条历史人工结论；可在“查看全部”中检查或修改。")
+        st.success(f"已按信号名、差异字段及4.0/5.1字段值精确复用 {stats['history_reused']} 条历史人工结论。")
 
     drafts_key, dirty_key, detail_key, version_key, _drafts = initialize_review_session(st.session_state, task_id)
     state_items = state.get("items", {})
