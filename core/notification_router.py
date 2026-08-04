@@ -87,21 +87,35 @@ def _release_notification_claim(claim_path: Path) -> None:
         pass
 
 
-def _custom_once(task_dir: Path, event: str, title: str, markdown: str, *, button_text: str = "", button_url: str = "", client: FeishuCustomBotClient | None = None, force: bool = False) -> bool:
+def _custom_once(
+    task_dir: Path,
+    event: str,
+    title: str,
+    markdown: str,
+    *,
+    button_text: str = "",
+    button_url: str = "",
+    client: FeishuCustomBotClient | None = None,
+    force: bool = False,
+    content_sensitive: bool = False,
+) -> bool:
     tdir = Path(task_dir)
     prefix = f"custom_bot_{event}"
     fingerprint = hashlib.sha256(json.dumps([title, markdown, button_text, button_url], ensure_ascii=False).encode("utf-8")).hexdigest()
     claim_path = _acquire_notification_claim(tdir, prefix)
     if claim_path is None:
         current = load_task_meta(tdir)
-        return current.get(f"{prefix}_status") == "sent" and current.get(f"{prefix}_fingerprint") == fingerprint
+        return current.get(f"{prefix}_status") == "sent" and (
+            not content_sensitive or current.get(f"{prefix}_fingerprint") == fingerprint
+        )
     try:
         with get_task_lock(tdir):
             meta = load_task_meta(tdir)
             if notification_channel(meta) != "feishu_custom_bot":
                 return False
-            if not force and meta.get(f"{prefix}_status") == "sent" and meta.get(f"{prefix}_fingerprint") == fingerprint:
-                return True
+            if not force and meta.get(f"{prefix}_status") == "sent":
+                if not content_sensitive or meta.get(f"{prefix}_fingerprint") == fingerprint:
+                    return True
             max_attempts = max(1, int(os.getenv("FEISHU_CUSTOM_BOT_MAX_ATTEMPTS", "3")))
             if not force and meta.get(f"{prefix}_status") == "failed" and int(meta.get(f"{prefix}_attempt_count") or 0) >= max_attempts:
                 return False
@@ -216,6 +230,7 @@ def notify_result_ready(task_dir: Path, *, custom_client: FeishuCustomBotClient 
             button_url=str(delivery["document_url"]),
             client=custom_client,
             force=force,
+            content_sensitive=True,
         )
     if doc_enabled and delivery_failed:
         error = str(delivery.get("last_error") or meta.get("delivery_error") or "未知错误")[:800]
@@ -236,6 +251,7 @@ def notify_result_ready(task_dir: Path, *, custom_client: FeishuCustomBotClient 
             button_url=str(meta.get("result_url") or ""),
             client=custom_client,
             force=force,
+            content_sensitive=True,
         )
     text = (
         f"任务编号：{meta.get('task_id', tdir.name)}\n"
@@ -251,6 +267,7 @@ def notify_result_ready(task_dir: Path, *, custom_client: FeishuCustomBotClient 
         button_url=str(meta.get("result_url") or ""),
         client=custom_client,
         force=force,
+        content_sensitive=True,
     )
 
 
