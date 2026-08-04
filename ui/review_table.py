@@ -186,6 +186,14 @@ def selected_grid_row_id(selected_rows: Any) -> str:
     return str(records[0].get("row_id") or "") if records else ""
 
 
+def selected_detail_row_id(response: Any) -> str | None:
+    """Return a detail selection only for the grid's immediate selection event."""
+
+    if manual_update_event_name(response) != "selectionChanged":
+        return None
+    return selected_grid_row_id(getattr(response, "selected_rows", None))
+
+
 def field_detail_state_key(detail_key: str, field_name: str) -> str:
     """Keep description and unit detail selections independent."""
 
@@ -322,10 +330,14 @@ def build_review_grid_options(
     )
     builder.configure_column(
         "详情",
-        editable=True,
+        editable=False,
         pinned="right",
-        cellEditor="agCheckboxCellEditor",
-        cellRenderer="agCheckboxCellRenderer",
+        checkboxSelection=True,
+        sortable=False,
+        filter=False,
+        resizable=False,
+        suppressHeaderMenuButton=True,
+        valueFormatter=JsCode("function() { return ''; }"),
         **layout["详情"],
     )
     builder.configure_grid_options(
@@ -335,6 +347,9 @@ def build_review_grid_options(
         animateRows=False,
         tooltipShowDelay=250,
         rowHeight=34,
+        rowSelection="single",
+        suppressRowClickSelection=True,
+        rowMultiSelectWithClick=False,
         getRowId=JsCode("function(params) { return params.data.row_id; }"),
     )
     return builder.build()
@@ -371,7 +386,9 @@ def _render_field_table_data_editor(field_name: str, task_id: str, items: list[d
         st.info(f"本任务没有{field_name}差异。")
         return False
 
-    grid_rows = [{**row, "详情": False} for row in rows]
+    # Detail is represented by AG Grid row selection, not an editable boolean.
+    # A non-boolean value avoids an extra disabled checkbox from type inference.
+    grid_rows = [{**row, "详情": ""} for row in rows]
     frame = pd.DataFrame(grid_rows)
     field_dirty_key = field_dirty_state_key(dirty_key, field_name)
     st.session_state.setdefault(field_dirty_key, [])
@@ -497,7 +514,7 @@ def _render_field_table_aggrid(
             + 86,
         ),
         update_mode=GridUpdateMode.MANUAL,
-        update_on=[],
+        update_on=["selectionChanged"],
         data_return_mode=DataReturnMode.AS_INPUT,
         allow_unsafe_jscode=True,
         show_toolbar=True,
@@ -525,15 +542,10 @@ def _render_field_table_aggrid(
             dirty,
         )
         st.session_state[field_dirty_key] = sorted(dirty)
-        chosen = next(
-            (
-                str(row.get("row_id") or "")
-                for row in returned_rows
-                if bool(row.get("详情"))
-            ),
-            "",
-        )
-        st.session_state[field_detail_state_key(detail_key, field_name)] = chosen
+
+    detail_selection = selected_detail_row_id(response)
+    if detail_selection is not None:
+        st.session_state[field_detail_state_key(detail_key, field_name)] = detail_selection
 
     if review_grid_debug_enabled():
         with st.expander(f"{field_name}AG Grid Manual同步诊断", expanded=False):
@@ -543,6 +555,7 @@ def _render_field_table_aggrid(
                     "component_key": component_key,
                     "sync_mode": "aggrid_manual_collector",
                     "event_name": event_name,
+                    "selected_detail_row_id": detail_selection,
                     "can_edit": can_edit,
                     "response_row_count": len(returned_rows),
                     "returned_row_ids": [
