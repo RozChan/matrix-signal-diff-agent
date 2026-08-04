@@ -22,12 +22,11 @@ except Exception:  # noqa: BLE001
 from core import run_all
 from core.ai_review import run_ai_review
 from core.final_export import FINAL_REVIEW_FILENAME, export_final_review_result
-from core.feishu_doc_service import publish_task_result_document, register_final_result_files
+from core.feishu_file_delivery import deliver_task_result_files, register_final_result_files
 from core.llm_client import get_llm_config, test_llm_connection
 from core.pipeline import OUTPUT_FILENAMES
 from core.result_notifier import build_results_zip
 from core.result_access import allowed_result_files, ensure_result_access, result_token_valid
-from core.notification_router import notify_result_ready
 from core.admin_tasks import admin_system_status, admin_token_valid, cancel_admin_task, create_admin_full_compare, list_admin_tasks, retry_admin_auto_finalization, retry_admin_confluence, retry_admin_review_notification, safe_task_dir
 from core.task_progress import allowed_admin_actions, build_task_progress, choose_default_task, status_label, trigger_label
 from core.review_table import pending_review_count
@@ -47,7 +46,6 @@ from core.review_store import (
     heartbeat_review_lock,
     is_signal_level_item,
     ReviewLockError,
-    utc_now_iso,
     update_task_meta,
 )
 
@@ -518,44 +516,19 @@ def _show_final_export(task_dir: Path, review_dir: Path, *, session_id: str, can
             updates = {"status": "final_exported", "final_generation_status": "done", "final_review_stats": stats, "final_result_files": registered_files}
             if meta.get("notify_type") == "feishu_custom_bot":
                 build_results_zip(task_dir)
-                updates["result_delivery_status"] = "web_ready"
+                updates["result_delivery_status"] = "pending"
             elif meta.get("source") in {"feishu", "feishu_confluence", "auto_full_compare"}:
                 updates["result_delivery_status"] = "pending"
             update_task_meta(task_dir, **updates)
             if meta.get("notify_type") == "feishu_custom_bot":
                 ensure_result_access(task_dir)
-                if os.getenv("FEISHU_DOC_DELIVERY_ENABLED", "false").strip().lower() == "true":
-                    try:
-                        with st.spinner("正在创建飞书云文档并插入3个结果附件……"):
-                            delivery = publish_task_result_document(task_dir, notify=True)
-                    except Exception as exc:  # noqa: BLE001 - cloud delivery must not roll back local export
-                        current_delivery = dict(load_task_meta(task_dir).get("feishu_delivery") or {})
-                        current_delivery.update(
-                            {
-                                "status": "failed",
-                                "error_type": "unexpected_error",
-                                "last_error": str(exc),
-                                "updated_at": utc_now_iso(),
-                            }
-                        )
-                        update_task_meta(
-                            task_dir,
-                            feishu_delivery=current_delivery,
-                            result_delivery_status="failed",
-                            delivery_error=str(exc),
-                        )
-                        try:
-                            notify_result_ready(task_dir)
-                        except Exception:  # noqa: BLE001 - fallback notification cannot roll back generated files
-                            pass
-                        delivery = {"success": False, "last_error": str(exc)}
-                    if delivery.get("success"):
-                        st.success("飞书云文档和3个结果附件已交付。")
-                    else:
-                        st.warning(f"本地结果已生成，但飞书文档交付失败：{delivery.get('last_error') or delivery.get('error_message') or '未知错误'}")
+                with st.spinner("正在向飞书群发送3个结果Excel……"):
+                    delivery = deliver_task_result_files(task_dir)
+                if delivery.get("success"):
+                    st.success("3个结果Excel已发送至飞书群。")
                 else:
-                    notify_result_ready(task_dir)
-            st.success(f"已生成：{final_path}")
+                    st.warning(f"本地结果已生成，但飞书群文件发送失败：{delivery.get('last_error') or '未知错误'}")
+            st.success("最终审核结果已生成。")
             st.dataframe(pd.DataFrame([{"指标": k, "数量": v} for k, v in stats.items()]), hide_index=True, use_container_width=True)
         except Exception as exc:  # noqa: BLE001
             update_task_meta(task_dir, review_completed=False, review_completed_at="", final_generation_status="failed", error=str(exc))
@@ -565,8 +538,6 @@ def _show_final_export(task_dir: Path, review_dir: Path, *, session_id: str, can
         st.info("该任务已完成审核或正在生成/发送结果，不能重复提交。")
     elif not can_edit:
         st.caption("只读模式不能生成最终结果，请先获取审核编辑锁。")
-    if final_path.exists():
-        st.info(f"最终审核结果文件已存在：{final_path}")
     st.markdown("<div style='height: 1.5rem'></div>", unsafe_allow_html=True)
 
 

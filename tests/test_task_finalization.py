@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 
 from core.admin_tasks import retry_admin_auto_finalization
+from core.ai_review import SOURCE_SHEETS
 from core.final_export import FINAL_REVIEW_FILENAME, SHEET_RULES
 from core.notification_router import scan_custom_notifications
+from core.pipeline import OUTPUT_FILENAMES
 from core.review_store import (
     create_task_meta,
     init_review_state,
@@ -44,6 +46,14 @@ def _task(tmp_path: Path, *, reviewed: bool) -> Path:
     output_dir.mkdir(parents=True)
     create_task_meta(tdir, tdir.name, status="awaiting_review")
     item = _item()
+    compare = Workbook()
+    compare.active.title = SOURCE_SHEETS[0]
+    compare.create_sheet(SOURCE_SHEETS[1])
+    for sheet_name in SOURCE_SHEETS:
+        compare[sheet_name].append(["4.0信号名", "5.1信号名", "差异点list"])
+    compare[SOURCE_SHEETS[0]].append([item["signal_40"], item["signal_51"], "信号值描述差异"])
+    compare.save(output_dir / OUTPUT_FILENAMES["compare"])
+    compare.close()
     (review_dir / "review_items.json").parent.mkdir(parents=True, exist_ok=True)
     (review_dir / "review_items.json").write_text(
         json.dumps([item], ensure_ascii=False), encoding="utf-8"
@@ -73,11 +83,10 @@ def test_all_history_covered_task_skips_review_and_generates_final_result(
     tmp_path: Path, monkeypatch
 ) -> None:
     tdir = _task(tmp_path, reviewed=True)
-    notices: list[Path] = []
-    monkeypatch.setenv("FEISHU_DOC_DELIVERY_ENABLED", "false")
+    deliveries: list[Path] = []
     monkeypatch.setattr(
-        "core.notification_router.notify_result_ready",
-        lambda task_dir, **_kwargs: notices.append(Path(task_dir)) or True,
+        "core.feishu_file_delivery.deliver_task_result_files",
+        lambda task_dir, **_kwargs: deliveries.append(Path(task_dir)) or {"success": True},
     )
 
     result = auto_finalize_if_no_pending(tdir)
@@ -88,8 +97,8 @@ def test_all_history_covered_task_skips_review_and_generates_final_result(
     workbook = load_workbook(final_path, read_only=True)
     try:
         assert workbook.sheetnames == SHEET_RULES
-        assert workbook["待人工确认"].max_row == 1
-        assert workbook["人工确认相同"].max_row == 2
+        assert workbook[SOURCE_SHEETS[0]].cell(2, 4).value == "相同"
+        assert workbook[SOURCE_SHEETS[0]].cell(2, 5).value == "人工"
     finally:
         workbook.close()
     meta = load_task_meta(tdir)
@@ -100,11 +109,11 @@ def test_all_history_covered_task_skips_review_and_generates_final_result(
     assert meta["auto_finalized_by_history"] is True
     assert meta["pending_manual_count"] == 0
     assert meta["result_url"]
-    assert notices == [tdir.resolve()]
+    assert deliveries == [tdir.resolve()]
 
     repeated = auto_finalize_if_no_pending(tdir)
     assert repeated["success"] is True and repeated["already_finalized"] is True
-    assert notices == [tdir.resolve()]
+    assert deliveries == [tdir.resolve()]
 
 
 def test_pending_task_stays_on_manual_review_path(tmp_path: Path) -> None:

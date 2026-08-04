@@ -44,28 +44,6 @@ def _acquire_claim(task_dir: Path) -> Path | None:
     return claim
 
 
-def _delivery_enabled() -> bool:
-    return os.getenv("FEISHU_DOC_DELIVERY_ENABLED", "false").strip().lower() == "true"
-
-
-def _record_unexpected_delivery_failure(task_dir: Path, exc: Exception) -> None:
-    current = dict(load_task_meta(task_dir).get("feishu_delivery") or {})
-    current.update(
-        {
-            "status": "failed",
-            "error_type": "unexpected_error",
-            "last_error": str(exc),
-            "updated_at": utc_now_iso(),
-        }
-    )
-    update_task_meta(
-        task_dir,
-        feishu_delivery=current,
-        result_delivery_status="failed",
-        delivery_error=str(exc),
-    )
-
-
 def auto_finalize_if_no_pending(
     task_dir: str | Path,
     *,
@@ -133,7 +111,7 @@ def auto_finalize_if_no_pending(
             review_dir / "review_state.json",
             final_path,
         )
-        from .feishu_doc_service import register_final_result_files
+        from .feishu_file_delivery import register_final_result_files
 
         registered_files = register_final_result_files(tdir, final_path)
         meta = load_task_meta(tdir)
@@ -151,7 +129,7 @@ def auto_finalize_if_no_pending(
         }
         if meta.get("notify_type") == "feishu_custom_bot":
             build_results_zip(tdir)
-            updates["result_delivery_status"] = "web_ready"
+            updates["result_delivery_status"] = "pending"
         elif meta.get("source") in {"feishu", "feishu_confluence", "auto_full_compare"}:
             updates["result_delivery_status"] = "pending"
         update_task_meta(tdir, **updates)
@@ -160,27 +138,13 @@ def auto_finalize_if_no_pending(
         if meta.get("notify_type") == "feishu_custom_bot":
             try:
                 ensure_result_access(tdir)
-                if _delivery_enabled():
-                    from .feishu_doc_service import publish_task_result_document
+                if notify:
+                    from .feishu_file_delivery import deliver_task_result_files
 
-                    delivery = publish_task_result_document(tdir, notify=notify)
-                elif notify:
-                    from .notification_router import notify_result_ready
-
-                    notify_result_ready(tdir)
+                    delivery = deliver_task_result_files(tdir)
             except Exception as exc:  # noqa: BLE001 - local final results remain valid
-                if _delivery_enabled():
-                    _record_unexpected_delivery_failure(tdir, exc)
-                else:
-                    update_task_meta(tdir, result_notification_error=str(exc))
+                update_task_meta(tdir, result_delivery_status="failed", delivery_error=str(exc))
                 delivery = {"success": False, "last_error": str(exc)}
-                if notify and _delivery_enabled():
-                    try:
-                        from .notification_router import notify_result_ready
-
-                        notify_result_ready(tdir)
-                    except Exception:  # noqa: BLE001 - keep generated local results
-                        pass
         return {
             "success": True,
             "status": load_task_meta(tdir).get("status"),

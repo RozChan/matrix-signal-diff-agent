@@ -2,12 +2,12 @@ from pathlib import Path
 import json
 import sys
 
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from core.final_export import HEADERS, SHEET_RULES, export_final_review_result
-from core.ai_review import is_text_only_ai_candidate
+from core.final_export import FINAL_RESULT_HEADERS, SHEET_RULES, export_final_review_result
+from core.ai_review import AI_REVIEW_SHEET, SOURCE_SHEETS, is_text_only_ai_candidate
 from core.review_store import acquire_review_lock, create_task_meta, init_review_state, save_review_state, update_review_field
 
 
@@ -24,13 +24,29 @@ def _text_item() -> dict:
 
 def _numeric_item() -> dict:
     return {
-        "item_id": "signal-2", "source_sheet": "完全同名匹配对比结果", "signal_40": "N40", "signal_51": "N51",
+        "item_id": "signal-2", "source_sheet": "vcu-hcu 同名匹配", "signal_40": "N40", "signal_51": "N51",
         "field_diffs": [
             {"diff_field": "信号值描述", "value_40": "Off", "value_51": "Disable", "field_type": "text"},
             {"diff_field": "信号长度", "value_40": "8", "value_51": "12", "field_type": "numeric"},
         ],
         "signal_ai_judgement": "真实差异", "signal_ai_reason": "包含数值差异",
     }
+
+
+def _compare_workbook(path: Path, items: list[dict]) -> None:
+    workbook = Workbook()
+    workbook.remove(workbook.active)
+    headers = ["4.0信号名", "5.1信号名", "差异点list", "原始备注"]
+    for sheet_name in SOURCE_SHEETS:
+        ws = workbook.create_sheet(sheet_name)
+        ws.append(headers)
+        for item in items:
+            if item["source_sheet"] == sheet_name:
+                ws.append([item["signal_40"], item["signal_51"], "差异内容", "保留值"])
+    workbook.create_sheet(AI_REVIEW_SHEET).append(["内部AI明细"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    workbook.save(path)
+    workbook.close()
 
 
 def test_field_review_updates_existing_value_and_numeric_is_system_different(tmp_path: Path) -> None:
@@ -53,7 +69,7 @@ def test_field_review_updates_existing_value_and_numeric_is_system_different(tmp
     assert len(state["items"]["signal-1"]["field_reviews"]) == 2
 
 
-def test_final_export_has_five_field_level_sheets(tmp_path: Path) -> None:
+def test_final_export_keeps_two_source_sheets_and_adds_signal_decisions(tmp_path: Path) -> None:
     task_dir = tmp_path / "task"
     review_dir = task_dir / "review"
     create_task_meta(task_dir, "task", status="reviewing")
@@ -66,14 +82,22 @@ def test_final_export_has_five_field_level_sheets(tmp_path: Path) -> None:
     items_path.parent.mkdir(parents=True, exist_ok=True)
     items_path.write_text(json.dumps(items, ensure_ascii=False), encoding="utf-8")
     output = tmp_path / "final.xlsx"
-    stats = export_final_review_result(items_path, review_dir / "review_state.json", output)
-    assert stats == {"人工确认不同": 1, "人工确认相同": 1, "系统判定不同": 2, "待人工确认": 0, "审核明细全量": 4}
+    compare = tmp_path / "compare.xlsx"
+    _compare_workbook(compare, items)
+    stats = export_final_review_result(items_path, review_dir / "review_state.json", output, compare_file_path=compare)
+    assert stats == {"判断结果-相同": 0, "判断结果-不同": 2, "判断来源-人工": 1, "判断来源-系统": 1, "审核信号总数": 2}
     wb = load_workbook(output, read_only=True)
     try:
         assert wb.sheetnames == SHEET_RULES
-        assert [cell.value for cell in wb["审核明细全量"][1]] == HEADERS
-        assert wb["人工确认不同"].cell(2, 9).value == "信号值描述不同"
-        assert wb["人工确认相同"].cell(2, 9).value == "单位相同"
+        assert AI_REVIEW_SHEET not in wb.sheetnames
+        for sheet_name, expected_source in ((SOURCE_SHEETS[0], "人工"), (SOURCE_SHEETS[1], "系统")):
+            ws = wb[sheet_name]
+            headers = [cell.value for cell in ws[1]]
+            diff_index = headers.index("差异点list")
+            assert tuple(headers[diff_index + 1:diff_index + 3]) == FINAL_RESULT_HEADERS
+            assert ws.cell(2, diff_index + 2).value == "不同"
+            assert ws.cell(2, diff_index + 3).value == expected_source
+            assert ws.cell(2, diff_index + 4).value == "保留值"
     finally:
         wb.close()
 

@@ -338,7 +338,7 @@ temp/<task_id>/
 
 ### 审核数据文件
 
-系统会继续保留最终差异 Excel 中的 `AI辅助复核与人工审核明细` sheet，作为交付和追溯材料。同时会基于该 sheet 生成结构化审核数据：
+系统会在中间比较文件中保留 `AI辅助复核与人工审核明细` sheet，用于生成结构化审核数据；正式交付的最终差异 Excel 会删除该内部明细 sheet：
 
 - `review/review_items.json`：网页端审核数据源，每条记录代表一个字段级差异；`item_id` 基于来源 sheet、4.0 信号名、5.1 信号名、差异字段、4.0 内容和 5.1 内容生成，不依赖 Excel 行号。
 - `review/review_state.json`：人工审核状态，每次保存审核结果或备注后立即写入本地文件，不只保存在 Streamlit session 中。
@@ -391,17 +391,7 @@ temp/<task_id>/
 output/人工审核后最终差异结果.xlsx
 ```
 
-该 Excel 包含 7 个 sheet：
-
-1. `最终保留差异`：人工审核结果为 `确认真实差异`；
-2. `确认可忽略差异`：人工审核结果为 `确认可忽略`；
-3. `确认错别字`：人工审核结果为 `确认错别字`；
-4. `确认语义一致`：人工审核结果为 `确认语义一致`；
-5. `存疑待确认`：人工审核结果为 `存疑待确认`；
-6. `未审核`：人工审核结果为空；
-7. `审核明细全量`：包含所有字段级差异和人工审核状态。
-
-即使某个分类没有数据，也会保留对应 sheet 和表头，便于固定交付格式。
+该 Excel 以 `4.0和5.1同一信号差异点识别.xlsx` 为底稿，只保留原始两个差异 sheet：`完全同名匹配对比结果` 和 `vcu-hcu 同名匹配`。每个 sheet 都在 `差异点list` 后增加 `判断结果`、`判断来源` 两列：判断结果只允许“相同/不同”，判断来源只允许“人工/系统”。历史人工结论归入“人工”；一个信号有任一字段判为不同，整行判断结果即为“不同”。内部的 `AI辅助复核与人工审核明细` sheet 不进入正式交付文件。
 
 ### 下载内容
 
@@ -523,7 +513,7 @@ output/人工审核后最终差异结果.xlsx
 3. 人工已修改的信号；
 4. 系统默认保留的真实差异信号。
 
-最终导出的 `人工审核后最终差异结果.xlsx` 也按信号级 item 输出，每个 sheet 一行代表一个信号差异项，并保留字段差异明细。旧任务如果仍是字段级 `review_items.json`，页面会提示“当前任务使用旧版字段级审核数据，建议重新运行任务生成信号级审核数据”，不会强制迁移旧结构。
+最终导出的 `人工审核后最终差异结果.xlsx` 沿用原始两个比较 sheet，每行代表一个信号差异项，并直接补充最终“判断结果/判断来源”。旧任务如果仍是字段级 `review_items.json`，页面会提示“当前任务使用旧版字段级审核数据，建议重新运行任务生成信号级审核数据”，不会强制迁移旧结构。
 
 ### AI 默认启用与审核卡片显示优化
 
@@ -646,7 +636,7 @@ BOT_ALLOWED_EXTENSIONS=.xlsx,.xlsm,.zip
 9. AI 复核完成后，机器人发送带 token 的人工审核链接：`{REVIEW_BASE_URL}/?task_id=<task_id>&token=<review_token>`。
 10. 用户在 Streamlit 页面完成人工审核并点击“完成审核并生成最终结果”。
 11. 系统生成 `人工审核后最终差异结果.xlsx`，并将 `result_delivery_status` 置为 `pending`。
-12. 启用飞书云文档交付后，系统创建结果文档并插入三份正式Excel，机器人发送“打开飞书结果文档”按钮；失败时保留本地结果页作为兜底，成功后状态变为 `delivered`。
+12. 系统将三份正式Excel改名后直接发送到指定飞书群，不再创建飞书云文档或发送最终汇总卡片；失败时保留本地结果页作为兜底，成功后状态变为 `delivered`。
 
 ### 文件安全
 
@@ -928,28 +918,24 @@ python tools\verify_aggrid_manual_save.py
 
 “系统判定真实差异”仍只收录至少含一个数值差异的信号，但每行会展示该信号的全部差异字段及4.0/5.1值，包括伴随的信号值描述和单位差异。
 
-### 飞书云文档结果交付
+### 飞书群结果文件交付
 
-最终人工审核结果生成后，可通过本机已完成用户授权的 `lark-cli` 自动创建云文档并插入三份结果Excel：
+最终人工审核结果生成后，系统直接向指定飞书群发送三份Excel，不再创建结果云文档，也不再发送“最终结果已生成”的汇总卡片：
 
 ```env
-LARK_CLI_PATH=C:\path\to\lark-cli.exe
-FEISHU_RESULT_FOLDER_TOKEN=<folder-token>
-FEISHU_DOC_DELIVERY_ENABLED=true
-FEISHU_DOC_CREATE_TIMEOUT_SECONDS=120
-FEISHU_DOC_UPLOAD_TIMEOUT_SECONDS=180
+FEISHU_RESULT_FILE_DELIVERY_ENABLED=true
+FEISHU_RESULT_CHAT_ID=oc_xxxxxxxxxxxxxxxx
+FEISHU_FILE_SEND_MODE=openapi
+FEISHU_APP_ID=<app-id>
+FEISHU_APP_SECRET=<app-secret>
+EEA40_BASELINE=26R1
+EEA51_BASELINE=26R2
 ```
 
-部署到Windows工作站后，先核对当前CLI版本的真实参数：
+`FEISHU_FILE_SEND_MODE=openapi` 使用现有企业应用的文件上传和群消息权限；如果工作站已验证 `lark-cli im +messages-send --file`，也可设为 `lark_cli` 并配置 `LARK_CLI_PATH`。自定义Webhook机器人仍只负责“任务开始”和“人工审核就绪”两条卡片，本身不能上传本地Excel。
 
-```bat
-python -m tools.check_feishu_doc_cli
-```
-
-该功能只调用 `lark-cli --as user`，不会读取或保存用户Token、refresh token、App Secret或CLI授权缓存。
-
-交付服务只使用任务登记的三份正式结果，并以清晰名称插入云文档：`EEA4.0全量信号矩阵清单.xlsx`、`EEA5.1全量信号矩阵清单.xlsx`、`人工审核后最终差异结果.xlsx`。三份附件全部成功后，第三阶段群机器人消息的主按钮为“打开飞书结果文档”并直接使用本次任务保存的文档URL；交付失败时，本地结果仍保留，消息会明确显示失败并回退到“进入结果下载页”。
+三份群文件名称为：`YYYYMMDD_<4.0基线>_EEA4.0全量信号矩阵清单.xlsx`、`YYYYMMDD_<5.1基线>_EEA5.1全量信号矩阵清单.xlsx`、`YYYYMMDD_EEA4.0和EEA5.1同名信号差异提取.xlsx`。日期使用北京时间且只保留年月日；基线优先从任务字段或 `EEA40_BASELINE`/`EEA51_BASELINE` 读取，也可从配置的Confluence父页面URL自动识别。三份文件逐项记录飞书消息ID，失败重试只补发未成功的文件。
 
 当历史人工结论或系统判定已经覆盖全部审核字段、`pending_manual_count=0` 时，任务会跳过人工审核通知，自动生成最终结果并直接进入上述第三阶段交付。仍有任何待确认项时继续使用原有AG Grid人工审核流程。自动生成默认最多尝试3次，可通过 `AUTO_FINALIZE_MAX_ATTEMPTS` 调整；失败后也可在管理员页面点击“继续生成零待审核任务的最终结果”进行强制重试。进程重启后，通知扫描会恢复尚未完成的零待审核任务。
 
-公司Windows工作站验收时，先在 `.env` 配置 `LARK_CLI_PATH`、`FEISHU_RESULT_FOLDER_TOKEN` 和 `FEISHU_DOC_DELIVERY_ENABLED=true`，再执行 `python -m tools.check_feishu_doc_cli` 确认当前用户授权及 `docs +create`、`docs +media-insert` 命令可用。随后完成一项测试任务的人工审核，确认目标文件夹只新增一份结果文档、文档内只有上述三个附件、群机器人按钮直接打开该文档。可在管理员页面重试一次失败交付，确认复用原 `document_id` 且只补传失败附件；本地结果下载页应始终保留。
+公司Windows工作站验收时，先确认企业应用机器人已在目标群内，并配置 `FEISHU_RESULT_CHAT_ID` 及选定发送方式所需凭据。随后完成一项测试任务，确认群里只出现三份Excel、没有最终汇总卡片和飞书结果文档；再人为制造一次单文件发送失败，从管理员页面重试，确认只补发失败文件。本地结果下载页应始终保留。
