@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import hmac
 import base64
+import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -13,7 +15,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.admin_tasks import admin_token_valid, retry_admin_review_notification, safe_task_dir
 from core.feishu_custom_bot import FeishuCustomBotClient, generate_signature
-from core.notification_router import notify_result_ready, notify_review_ready, notify_task_failed, notify_task_started, scan_custom_notifications
+from core.notification_router import (
+    _acquire_notification_claim,
+    _notification_claim_path,
+    _release_notification_claim,
+    notify_result_ready,
+    notify_review_ready,
+    notify_task_failed,
+    notify_task_started,
+    scan_custom_notifications,
+)
 from core.result_access import allowed_result_files, ensure_result_access, resolve_allowed_result_file, result_token_valid
 from core.review_store import create_task_meta, load_task_meta, update_task_meta
 
@@ -130,6 +141,38 @@ def test_review_notice_is_skipped_without_pending_items(tmp_path: Path) -> None:
     client = FakeCustomClient()
     assert not notify_review_ready(tdir, custom_client=client)
     assert client.cards == []
+
+
+def test_review_notice_active_cross_process_claim_prevents_duplicate(tmp_path: Path) -> None:
+    tdir = task(tmp_path)
+    update_task_meta(tdir, status="awaiting_review", review_url="https://review/task", pending_manual_count=1)
+    claim = _acquire_notification_claim(tdir, "custom_bot_review_ready")
+    assert claim is not None
+    client = FakeCustomClient()
+    try:
+        assert not notify_review_ready(tdir, custom_client=client)
+        assert client.cards == []
+        assert load_task_meta(tdir).get("custom_bot_review_ready_attempt_count") is None
+    finally:
+        _release_notification_claim(claim)
+
+    assert notify_review_ready(tdir, custom_client=client)
+    assert len(client.cards) == 1
+
+
+def test_review_notice_recovers_stale_cross_process_claim(tmp_path: Path, monkeypatch) -> None:
+    tdir = task(tmp_path)
+    update_task_meta(tdir, status="awaiting_review", review_url="https://review/task", pending_manual_count=1)
+    monkeypatch.setenv("FEISHU_NOTIFICATION_CLAIM_STALE_SECONDS", "30")
+    claim = _notification_claim_path(tdir, "custom_bot_review_ready")
+    claim.write_text("stale", encoding="utf-8")
+    stale_time = time.time() - 60
+    os.utime(claim, (stale_time, stale_time))
+    client = FakeCustomClient()
+
+    assert notify_review_ready(tdir, custom_client=client)
+    assert len(client.cards) == 1
+    assert not claim.exists()
 
 
 def test_admin_can_force_resend_review_notice_without_rerunning_task(tmp_path: Path, monkeypatch) -> None:

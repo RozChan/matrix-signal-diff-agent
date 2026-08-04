@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -36,36 +37,93 @@ def _admin_url() -> str:
     return f"{base}/?{urlencode({'view': 'admin'})}"
 
 
+def _notification_claim_path(task_dir: Path, prefix: str) -> Path:
+    claim_dir = Path(task_dir).resolve() / "bot" / "notification_claims"
+    claim_dir.mkdir(parents=True, exist_ok=True)
+    return claim_dir / f"{prefix}.lock"
+
+
+def _acquire_notification_claim(task_dir: Path, prefix: str) -> Path | None:
+    """Atomically claim one notification across worker and scanner processes."""
+
+    claim_path = _notification_claim_path(task_dir, prefix)
+    try:
+        stale_seconds = max(30, int(os.getenv("FEISHU_NOTIFICATION_CLAIM_STALE_SECONDS", "300")))
+    except ValueError:
+        stale_seconds = 300
+    for _attempt in range(2):
+        try:
+            fd = os.open(str(claim_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:
+                age_seconds = max(0.0, time.time() - claim_path.stat().st_mtime)
+            except FileNotFoundError:
+                continue
+            if age_seconds <= stale_seconds:
+                return None
+            try:
+                claim_path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                return None
+            continue
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps({"pid": os.getpid(), "claimed_at": _utc_now()}, ensure_ascii=False))
+        except Exception:
+            claim_path.unlink(missing_ok=True)
+            raise
+        return claim_path
+    return None
+
+
+def _release_notification_claim(claim_path: Path) -> None:
+    try:
+        claim_path.unlink(missing_ok=True)
+    except OSError:
+        # A stale claim is recoverable on the next scan. Notification success
+        # is already persisted before this cleanup is attempted.
+        pass
+
+
 def _custom_once(task_dir: Path, event: str, title: str, markdown: str, *, button_text: str = "", button_url: str = "", client: FeishuCustomBotClient | None = None, force: bool = False) -> bool:
     tdir = Path(task_dir)
     prefix = f"custom_bot_{event}"
     fingerprint = hashlib.sha256(json.dumps([title, markdown, button_text, button_url], ensure_ascii=False).encode("utf-8")).hexdigest()
-    with get_task_lock(tdir):
-        meta = load_task_meta(tdir)
-        if notification_channel(meta) != "feishu_custom_bot":
-            return False
-        if not force and meta.get(f"{prefix}_status") in {"sending", "sent"} and meta.get(f"{prefix}_fingerprint") == fingerprint:
-            return meta.get(f"{prefix}_status") == "sent"
-        max_attempts = max(1, int(os.getenv("FEISHU_CUSTOM_BOT_MAX_ATTEMPTS", "3")))
-        if not force and meta.get(f"{prefix}_status") == "failed" and int(meta.get(f"{prefix}_attempt_count") or 0) >= max_attempts:
-            return False
-        update_task_meta(
-            tdir,
-            **{
-                f"{prefix}_status": "sending",
-                f"{prefix}_fingerprint": fingerprint,
-                f"{prefix}_attempt_count": int(meta.get(f"{prefix}_attempt_count") or 0) + 1,
-                f"{prefix}_last_attempt_at": _utc_now(),
-                f"{prefix}_last_error": "",
-            },
-        )
+    claim_path = _acquire_notification_claim(tdir, prefix)
+    if claim_path is None:
+        current = load_task_meta(tdir)
+        return current.get(f"{prefix}_status") == "sent" and current.get(f"{prefix}_fingerprint") == fingerprint
     try:
-        (client or FeishuCustomBotClient()).send_card(title, markdown, button_text=button_text, button_url=button_url)
-    except Exception as exc:  # noqa: BLE001
-        update_task_meta(tdir, **{f"{prefix}_status": "failed", f"{prefix}_last_error": str(exc)})
-        return False
-    update_task_meta(tdir, **{f"{prefix}_status": "sent", f"{prefix}_notified_at": _utc_now(), f"{prefix}_last_error": ""})
-    return True
+        with get_task_lock(tdir):
+            meta = load_task_meta(tdir)
+            if notification_channel(meta) != "feishu_custom_bot":
+                return False
+            if not force and meta.get(f"{prefix}_status") == "sent" and meta.get(f"{prefix}_fingerprint") == fingerprint:
+                return True
+            max_attempts = max(1, int(os.getenv("FEISHU_CUSTOM_BOT_MAX_ATTEMPTS", "3")))
+            if not force and meta.get(f"{prefix}_status") == "failed" and int(meta.get(f"{prefix}_attempt_count") or 0) >= max_attempts:
+                return False
+            update_task_meta(
+                tdir,
+                **{
+                    f"{prefix}_status": "sending",
+                    f"{prefix}_fingerprint": fingerprint,
+                    f"{prefix}_attempt_count": int(meta.get(f"{prefix}_attempt_count") or 0) + 1,
+                    f"{prefix}_last_attempt_at": _utc_now(),
+                    f"{prefix}_last_error": "",
+                },
+            )
+        try:
+            (client or FeishuCustomBotClient()).send_card(title, markdown, button_text=button_text, button_url=button_url)
+        except Exception as exc:  # noqa: BLE001
+            update_task_meta(tdir, **{f"{prefix}_status": "failed", f"{prefix}_last_error": str(exc)})
+            return False
+        update_task_meta(tdir, **{f"{prefix}_status": "sent", f"{prefix}_notified_at": _utc_now(), f"{prefix}_last_error": ""})
+        return True
+    finally:
+        _release_notification_claim(claim_path)
 
 
 def notify_task_started(task_dir: Path, *, custom_client: FeishuCustomBotClient | None = None) -> bool:
