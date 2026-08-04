@@ -16,7 +16,7 @@ from core.review_history import history_counts, history_database_path
 from core.review_store import acquire_review_lock, compute_review_stats, create_task_meta, init_review_state, load_task_meta, update_task_meta
 from core.review_table import PENDING_REVIEW_LABEL, apply_editor_changes, field_rows, format_multiline_enum_value, pending_review_count, result_display, result_value, save_dirty_reviews
 from core.task_progress import ACTIVE_STATUSES, allowed_admin_actions, beijing_time, build_task_progress, choose_default_task, overall_percent
-from ui.review_table import ReviewGridSyncError, aggrid_key, build_review_grid_options, capture_grid_changes, capture_grid_response, chinese_review_stats, description_cell_options, editor_key, field_detail_state_key, field_dirty_state_key, field_drafts_state_key, grid_column_layout, initialize_review_session, manual_update_event_name, review_editor_mode, review_phase, review_table_order, save_button_disabled, selected_grid_row_id, system_difference_rows
+from ui.review_table import ReviewGridSyncError, aggrid_key, build_review_grid_options, capture_grid_changes, capture_grid_response, chinese_review_stats, description_cell_options, editor_key, field_detail_state_key, field_dirty_state_key, field_drafts_state_key, grid_column_layout, initialize_review_session, manual_update_event_name, review_editor_mode, review_phase, review_table_order, save_button_disabled, selected_detail_row_id, selected_grid_row_id, system_difference_rows
 import ui.review_table as review_table_ui
 
 
@@ -211,7 +211,7 @@ def test_manual_grid_options_keep_identity_hidden_and_full_grid_features() -> No
         "row_id": "a::单位", "item_id": "a", "field_key": "单位", "序号": 1,
         "EEA4.0信号名": "A", "EEA5.1信号名": "B",
         "EEA4.0单位": "Nm", "EEA5.1单位": "N·m",
-        "AI判断结果": "疑似可忽略", "人工确认": PENDING_REVIEW_LABEL, "详情": False,
+        "AI判断结果": "疑似可忽略", "人工确认": PENDING_REVIEW_LABEL, "详情": "",
     }]
     options = build_review_grid_options(pd.DataFrame(rows), "单位", can_edit=True)
     columns = {column["field"]: column for column in options["columnDefs"]}
@@ -226,6 +226,10 @@ def test_manual_grid_options_keep_identity_hidden_and_full_grid_features() -> No
     assert 'alignItems: "center"' in confirm_style
     assert 'justifyContent: "flex-start"' in confirm_style
     assert columns["详情"]["pinned"] == "right"
+    assert columns["详情"]["checkboxSelection"] is True
+    assert columns["详情"]["editable"] is False
+    assert options["rowSelection"] == "single"
+    assert options["suppressRowClickSelection"] is True
     assert options["columnDefs"][-1]["field"] == "详情"
 
 
@@ -324,6 +328,25 @@ def test_aggrid_detail_selection_is_single_stable_row() -> None:
     assert selected_grid_row_id([{"row_id": "a::单位"}]) == "a::单位"
     assert selected_grid_row_id([]) == ""
     assert field_detail_state_key("detail-task", "信号值描述") != field_detail_state_key("detail-task", "单位")
+
+
+def test_aggrid_detail_selection_returns_immediately_without_manual_submit() -> None:
+    selection = SimpleNamespace(
+        event_data={"streamlitRerunEventTriggerName": "selectionChanged"},
+        selected_rows=pd.DataFrame([{"row_id": "a::单位"}]),
+    )
+    cleared = SimpleNamespace(
+        event_data={"streamlitRerunEventTriggerName": "selectionChanged"},
+        selected_rows=None,
+    )
+    manual = SimpleNamespace(
+        event_data={"streamlitRerunEventTriggerName": "manualUpdate"},
+        selected_rows=pd.DataFrame([{"row_id": "a::单位"}]),
+    )
+
+    assert selected_detail_row_id(selection) == "a::单位"
+    assert selected_detail_row_id(cleared) == ""
+    assert selected_detail_row_id(manual) is None
 
 
 def test_dirty_batch_save_preserves_lock_and_revision(tmp_path: Path) -> None:
