@@ -109,8 +109,13 @@ def test_publish_uses_exact_three_registered_files_and_is_idempotent(tmp_path: P
     create_command = calls[0][0]
     assert create_command[create_command.index("--title") + 1] == "20260729_090203_信号矩阵全量对比最终结果"
     content = create_command[create_command.index("--content") + 1]
-    assert "初始待人工确认数量" in content
-    assert all(name in content for name in ATTACHMENT_LABELS.values())
+    assert content == """# EEA4.0与EEA5.1信号差异识别结果
+
+## 结果附件
+EEA4.0全量信号矩阵清单.xlsx
+EEA5.1全量信号矩阵清单.xlsx
+人工审核后最终差异结果.xlsx
+"""
     saved = load_task_meta(tdir)
     assert saved["result_delivery_status"] == "ready"
     assert all(

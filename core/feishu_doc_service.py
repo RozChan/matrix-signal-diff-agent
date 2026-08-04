@@ -16,7 +16,7 @@ from openpyxl import load_workbook
 
 from .final_export import FINAL_REVIEW_FILENAME, SHEET_RULES
 from .pipeline import OUTPUT_FILENAMES
-from .review_store import compute_review_stats, load_review_items, load_review_state, load_task_meta, update_task_meta, utc_now_iso
+from .review_store import load_task_meta, update_task_meta, utc_now_iso
 from .task_lock import get_task_lock
 
 ATTACHMENT_ORDER = ("full_40", "full_51", "compare_final")
@@ -229,14 +229,6 @@ def _safe_title(value: str) -> str:
     return re.sub(r"[\x00-\x1f<>]", "_", value).strip()[:200]
 
 
-def _data_row_count(path: Path) -> int:
-    workbook = load_workbook(path, read_only=True, data_only=True)
-    try:
-        return max(0, workbook.active.max_row - 1)
-    finally:
-        workbook.close()
-
-
 def _staged_attachment(task_dir: Path, key: str, source: Path) -> Path:
     """Copy one registered result to its stable Feishu display name."""
 
@@ -258,69 +250,12 @@ def _staged_attachment(task_dir: Path, key: str, source: Path) -> Path:
 
 
 def _document_content(task_dir: Path, meta: dict[str, Any], files: dict[str, Path]) -> str:
-    review_dir = Path(task_dir) / "review"
-    stats = compute_review_stats(load_review_items(review_dir), load_review_state(review_dir))
-    fields: list[tuple[str, Any]] = [
-        ("任务编号", meta.get("task_id") or Path(task_dir).name),
-        ("触发方式", meta.get("trigger_source")),
-        ("任务开始时间", meta.get("triggered_at") or meta.get("created_at")),
-        ("最终审核确认时间", meta.get("review_completed_at")),
-        ("任务完成时间", meta.get("updated_at")),
-    ]
-    task_lines = "\n".join(f"- {label}：{value}" for label, value in fields if value not in (None, ""))
-    input_lines = "\n".join([
-        f"- EEA4.0输入文件数量：{int(meta.get('input_40_count') or 0)}",
-        f"- EEA5.1输入文件数量：{int(meta.get('input_51_count') or 0)}",
-        f"- EEA4.0全量信号数量：{_data_row_count(files['full_40'])}",
-        f"- EEA5.1全量信号数量：{_data_row_count(files['full_51'])}",
-        f"- 历史版本跳过数量：{int(meta.get('full_compare_skipped_history_count') or 0)}",
-    ])
-    actual_manual_count = max(0, int(stats.get("manual_confirmed") or 0) - int(stats.get("history_reused") or 0))
-    initial_pending_count = int(
-        meta.get("initial_pending_manual_count")
-        if meta.get("initial_pending_manual_count") is not None
-        else int(stats.get("pending_manual") or 0) + actual_manual_count
-    )
-    result_lines = "\n".join([
-        f"- 初始待人工确认数量：{initial_pending_count}",
-        f"- 系统判定不同数量：{int(stats.get('system_different') or 0)}",
-        f"- 人工确认不同数量：{int(stats.get('manual_different') or 0)}",
-        f"- 人工确认相同数量：{int(stats.get('manual_same') or 0)}",
-        f"- 历史人工复用数量：{int(stats.get('history_reused') or 0)}",
-        f"- 本次人工确认数量：{actual_manual_count}",
-        f"- 待人工确认数量：{int(stats.get('pending_manual') or 0)}",
-        (
-            "- 最终状态：无需新增人工确认，历史人工结论复用完成，最终结果已生成"
-            if actual_manual_count == 0
-            and int(stats.get("pending_manual") or 0) == 0
-            and int(stats.get("history_reused") or 0) > 0
-            else (
-                "- 最终状态：无需新增人工确认，系统判定完成，最终结果已生成"
-                if actual_manual_count == 0 and int(stats.get("pending_manual") or 0) == 0
-                else "- 最终状态：人工审核完成，最终结果已生成"
-            )
-        ),
-    ])
     return f"""# EEA4.0与EEA5.1信号差异识别结果
 
-## 一、任务信息
-{task_lines}
-
-## 二、输入信息
-{input_lines}
-
-## 三、结果统计
-{result_lines}
-
-## 四、审核说明
-- 信号值描述和单位分别审核；
-- 历史人工结果使用严格字段指纹匹配；
-- 最终结果以本次任务保存的人工结论为准。
-
-## 五、结果附件
-1. {ATTACHMENT_LABELS['full_40']}
-2. {ATTACHMENT_LABELS['full_51']}
-3. {ATTACHMENT_LABELS['compare_final']}
+## 结果附件
+{ATTACHMENT_LABELS['full_40']}
+{ATTACHMENT_LABELS['full_51']}
+{ATTACHMENT_LABELS['compare_final']}
 """
 
 
