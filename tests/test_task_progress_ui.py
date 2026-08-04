@@ -16,7 +16,7 @@ from core.review_history import history_counts, history_database_path
 from core.review_store import acquire_review_lock, compute_review_stats, create_task_meta, init_review_state, load_task_meta, update_task_meta
 from core.review_table import PENDING_REVIEW_LABEL, apply_editor_changes, field_rows, format_multiline_enum_value, pending_review_count, result_display, result_value, save_dirty_reviews
 from core.task_progress import ACTIVE_STATUSES, allowed_admin_actions, beijing_time, build_task_progress, choose_default_task, overall_percent
-from ui.review_table import ReviewGridSyncError, aggrid_key, build_review_grid_options, capture_grid_changes, capture_grid_response, chinese_review_stats, description_cell_options, editor_key, field_detail_state_key, field_dirty_state_key, field_drafts_state_key, grid_column_layout, initialize_review_session, manual_update_event_name, review_editor_mode, review_phase, review_table_order, save_button_disabled, selected_detail_row_id, selected_grid_row_id, system_difference_rows
+from ui.review_table import ReviewGridSyncError, aggrid_key, build_review_grid_options, capture_grid_changes, capture_grid_response, chinese_review_stats, description_cell_options, detail_column_default, editor_key, field_detail_state_key, field_dirty_state_key, field_drafts_state_key, grid_column_layout, initialize_review_session, manual_update_event_name, review_editor_mode, review_phase, review_table_order, save_button_disabled, selected_detail_row_id, selected_grid_row_id, system_difference_rows
 import ui.review_table as review_table_ui
 
 
@@ -181,6 +181,7 @@ def test_binary_editor_drafts_only_mark_changed_fields() -> None:
 
 def test_editor_key_is_stable_and_separate_for_both_fields() -> None:
     assert aggrid_key("信号值描述", "task", True) == aggrid_key("信号值描述", "task", True)
+    assert aggrid_key("信号值描述", "task", True).startswith("review-aggrid-manual-v2-")
     assert aggrid_key("信号值描述", "task", True) != aggrid_key("信号值描述", "task", False)
     assert aggrid_key("信号值描述", "task", True) != aggrid_key("单位", "task", True)
     assert aggrid_key("单位", "task", True) != editor_key("单位", "task", True)
@@ -235,11 +236,18 @@ def test_manual_grid_options_keep_identity_hidden_and_full_grid_features() -> No
 
 def test_aggrid_column_layout_bounds_long_values_and_keeps_actions_compact() -> None:
     layout = grid_column_layout("信号值描述")
-    assert layout["EEA4.0信号值描述"] == {"flex": 1, "minWidth": 220}
-    assert layout["EEA5.1信号值描述"] == {"flex": 1, "minWidth": 220}
-    assert layout["EEA4.0信号名"]["maxWidth"] == 175
+    assert layout["EEA4.0信号值描述"] == {"flex": 1.6, "minWidth": 240}
+    assert layout["EEA5.1信号值描述"] == {"flex": 1.6, "minWidth": 240}
+    assert layout["EEA4.0信号名"] == {"flex": 0.9, "minWidth": 130}
+    assert "maxWidth" not in layout["EEA4.0信号名"]
+    assert layout["AI判断结果"]["maxWidth"] == 150
     assert layout["人工确认"]["maxWidth"] == 180
     assert layout["详情"]["maxWidth"] == 64
+
+
+def test_detail_column_defaults_match_each_editor_implementation() -> None:
+    assert detail_column_default("data_editor") is False
+    assert detail_column_default("aggrid_manual") == ""
 
 
 def test_description_pair_uses_native_shared_auto_height_without_dom_renderer() -> None:
