@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import base64
+import json
 import os
 import sys
 import time
@@ -158,6 +159,22 @@ def test_review_notice_active_cross_process_claim_prevents_duplicate(tmp_path: P
 
     assert notify_review_ready(tdir, custom_client=client)
     assert len(client.cards) == 1
+
+
+def test_review_notice_does_not_resend_when_meta_timestamp_changes(tmp_path: Path) -> None:
+    tdir = task(tmp_path)
+    update_task_meta(tdir, status="awaiting_review", review_url="https://review/task", pending_manual_count=1)
+    client = FakeCustomClient()
+
+    assert notify_review_ready(tdir, custom_client=client)
+    meta_path = tdir / "task_meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["updated_at"] = "2099-01-02T03:04:05+00:00"
+    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    assert notify_review_ready(tdir, custom_client=client)
+    assert len(client.cards) == 1
+    assert load_task_meta(tdir)["custom_bot_review_ready_attempt_count"] == 1
 
 
 def test_review_notice_recovers_stale_cross_process_claim(tmp_path: Path, monkeypatch) -> None:
