@@ -205,7 +205,12 @@ def scan_custom_notifications(custom_client: FeishuCustomBotClient | None = None
         if meta.get("status") in {"failed", "requires_manual_check"}:
             notify_task_failed(tdir, custom_client=custom_client)
         elif meta.get("status") == "awaiting_review":
-            notify_review_ready(tdir, custom_client=custom_client)
+            if int(meta.get("pending_manual_count") or 0) <= 0:
+                from .task_finalization import auto_finalize_if_no_pending
+
+                auto_finalize_if_no_pending(tdir, notify=True)
+            else:
+                notify_review_ready(tdir, custom_client=custom_client)
         elif meta.get("status") in {"final_exported", "delivered"}:
             if os.getenv("FEISHU_DOC_DELIVERY_ENABLED", "false").strip().lower() == "true" and meta.get("status") == "final_exported":
                 from .feishu_doc_service import publish_task_result_document

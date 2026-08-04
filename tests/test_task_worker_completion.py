@@ -46,9 +46,15 @@ def test_worker_records_failed_ai_calls_as_processed_and_dispatches_review_notic
         lambda _task_path: {"review_url": "https://review/task-worker"},
     )
     notices: list[Path] = []
+    finalizations: list[Path] = []
     monkeypatch.setattr(
         "core.notification_router.notify_review_ready",
         lambda path: notices.append(Path(path)) or True,
+    )
+    monkeypatch.setattr(
+        "core.task_finalization.auto_finalize_if_no_pending",
+        lambda path, notify=True: finalizations.append(Path(path))
+        or {"success": True},
     )
 
     result = run_task(task_path.name)
@@ -59,6 +65,7 @@ def test_worker_records_failed_ai_calls_as_processed_and_dispatches_review_notic
     assert meta["ai_completed_signal_count"] == 25
     assert meta["ai_failed_signal_count"] == 4
     assert notices == [task_path]
+    assert finalizations == []
     assert result["review_stats"]["pending_manual"] == 4
 
 
@@ -102,11 +109,19 @@ def test_worker_does_not_send_review_notice_without_pending_items(
         lambda _task_path: {"review_url": "https://review/task-no-pending"},
     )
     notices: list[Path] = []
+    finalizations: list[Path] = []
     monkeypatch.setattr(
         "core.notification_router.notify_review_ready",
         lambda path: notices.append(Path(path)) or True,
     )
+    monkeypatch.setattr(
+        "core.task_finalization.auto_finalize_if_no_pending",
+        lambda path, notify=True: finalizations.append(Path(path))
+        or {"success": True},
+    )
 
-    run_task(task_path.name)
+    result = run_task(task_path.name)
 
     assert notices == []
+    assert finalizations == [task_path]
+    assert result["auto_finalization"]["success"] is True

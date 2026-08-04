@@ -140,6 +140,20 @@ def retry_admin_review_notification(task_id: str, actor: str = "admin_web") -> b
     return notify_review_ready(tdir, force=True)
 
 
+def retry_admin_auto_finalization(task_id: str, actor: str = "admin_web") -> dict[str, Any]:
+    tdir = safe_task_dir(task_id)
+    with get_task_lock(tdir):
+        meta = load_task_meta(tdir)
+        if meta.get("status") != "awaiting_review":
+            raise ValueError("当前任务不处于待人工审核状态")
+        if int(meta.get("pending_manual_count") or 0) > 0:
+            raise ValueError("当前任务仍有待人工确认项，不能自动生成结果")
+        _record_action(tdir, "retry_auto_finalization", actor)
+    from .task_finalization import auto_finalize_if_no_pending
+
+    return auto_finalize_if_no_pending(tdir, notify=True, force=True)
+
+
 def admin_system_status() -> dict[str, Any]:
     mail = load_mail_state()
     active = next((row for row in list_admin_tasks() if row["status"] in {"created", "downloading", "ready", "running", "ai_reviewing", "generating_review", "ai_review_done"}), None)

@@ -950,4 +950,6 @@ python -m tools.check_feishu_doc_cli
 
 交付服务只使用任务登记的三份正式结果，并以清晰名称插入云文档：`EEA4.0全量信号矩阵清单.xlsx`、`EEA5.1全量信号矩阵清单.xlsx`、`人工审核后最终差异结果.xlsx`。三份附件全部成功后，第三阶段群机器人消息的主按钮为“打开飞书结果文档”并直接使用本次任务保存的文档URL；交付失败时，本地结果仍保留，消息会明确显示失败并回退到“进入结果下载页”。
 
+当历史人工结论或系统判定已经覆盖全部审核字段、`pending_manual_count=0` 时，任务会跳过人工审核通知，自动生成最终结果并直接进入上述第三阶段交付。仍有任何待确认项时继续使用原有AG Grid人工审核流程。自动生成默认最多尝试3次，可通过 `AUTO_FINALIZE_MAX_ATTEMPTS` 调整；失败后也可在管理员页面点击“继续生成零待审核任务的最终结果”进行强制重试。进程重启后，通知扫描会恢复尚未完成的零待审核任务。
+
 公司Windows工作站验收时，先在 `.env` 配置 `LARK_CLI_PATH`、`FEISHU_RESULT_FOLDER_TOKEN` 和 `FEISHU_DOC_DELIVERY_ENABLED=true`，再执行 `python -m tools.check_feishu_doc_cli` 确认当前用户授权及 `docs +create`、`docs +media-insert` 命令可用。随后完成一项测试任务的人工审核，确认目标文件夹只新增一份结果文档、文档内只有上述三个附件、群机器人按钮直接打开该文档。可在管理员页面重试一次失败交付，确认复用原 `document_id` 且只补传失败附件；本地结果下载页应始终保留。
