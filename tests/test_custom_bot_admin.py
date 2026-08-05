@@ -75,6 +75,24 @@ def test_custom_bot_signature_and_success(monkeypatch) -> None:
     assert "sign" in session.calls[0][1]
 
 
+def test_custom_bot_card_supports_three_cloud_sheet_buttons(monkeypatch) -> None:
+    monkeypatch.setenv("FEISHU_CUSTOM_BOT_ENABLED", "true")
+    session = FakeSession()
+    client = FeishuCustomBotClient("https://example.test/hook/redacted", "", session)
+    client.send_card(
+        "结果已生成",
+        "三个飞书云表格",
+        buttons=[
+            {"text": "表格1", "url": "https://feishu/sheets/1", "type": "default"},
+            {"text": "表格2", "url": "https://feishu/sheets/2", "type": "default"},
+            {"text": "表格3", "url": "https://feishu/sheets/3", "type": "primary"},
+        ],
+    )
+    actions = session.calls[0][1]["card"]["elements"][1]["actions"]
+    assert [action["text"]["content"] for action in actions] == ["表格1", "表格2", "表格3"]
+    assert actions[-1]["type"] == "primary"
+
+
 def test_custom_bot_errors_do_not_expose_credentials(monkeypatch) -> None:
     webhook = "https://example.test/hook/private-value"
     secret = "private-secret"
@@ -109,8 +127,12 @@ def test_started_review_failed_result_notifications_are_idempotent(tmp_path: Pat
     output.mkdir(parents=True)
     (output / "人工审核后最终差异结果.xlsx").write_bytes(b"xlsx")
     update_task_meta(tdir, status="final_exported", review_completed_at="now")
-    assert notify_result_ready(tdir, custom_client=client)
-    assert notify_result_ready(tdir, custom_client=client)
+    os.environ["FEISHU_RESULT_SHEET_DELIVERY_ENABLED"] = "false"
+    try:
+        assert notify_result_ready(tdir, custom_client=client)
+        assert notify_result_ready(tdir, custom_client=client)
+    finally:
+        os.environ.pop("FEISHU_RESULT_SHEET_DELIVERY_ENABLED", None)
     assert len(client.cards) == 4 and "result_token=" in client.cards[-1][2]["button_url"]
 
 
@@ -216,12 +238,12 @@ def test_notification_failure_is_recorded_without_failing_task(tmp_path: Path) -
     assert "webhook unavailable" in meta["custom_bot_started_last_error"]
 
 
-def test_custom_notification_scan_resumes_direct_file_delivery(tmp_path: Path, monkeypatch) -> None:
+def test_custom_notification_scan_resumes_cloud_sheet_delivery(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("TASK_ROOT_DIR", str(tmp_path))
     tdir = task(tmp_path)
     update_task_meta(tdir, status="final_exported")
     calls = []
-    monkeypatch.setattr("core.feishu_file_delivery.deliver_task_result_files", lambda task_dir: calls.append(task_dir) or {"success": True})
+    monkeypatch.setattr("core.feishu_sheet_delivery.deliver_task_result_sheets", lambda task_dir, **_kwargs: calls.append(task_dir) or {"success": True})
 
     client = FakeCustomClient()
     scan_custom_notifications(client)

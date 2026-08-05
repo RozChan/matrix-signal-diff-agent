@@ -139,9 +139,9 @@ def auto_finalize_if_no_pending(
             try:
                 ensure_result_access(tdir)
                 if notify:
-                    from .feishu_file_delivery import deliver_task_result_files
+                    from .feishu_sheet_delivery import deliver_task_result_sheets
 
-                    delivery = deliver_task_result_files(tdir)
+                    delivery = deliver_task_result_sheets(tdir)
             except Exception as exc:  # noqa: BLE001 - local final results remain valid
                 update_task_meta(tdir, result_delivery_status="failed", delivery_error=str(exc))
                 delivery = {"success": False, "last_error": str(exc)}

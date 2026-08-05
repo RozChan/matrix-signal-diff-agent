@@ -22,7 +22,8 @@ except Exception:  # noqa: BLE001
 from core import run_all
 from core.ai_review import run_ai_review
 from core.final_export import FINAL_REVIEW_FILENAME, export_final_review_result
-from core.feishu_file_delivery import deliver_task_result_files, register_final_result_files
+from core.feishu_file_delivery import register_final_result_files
+from core.feishu_sheet_delivery import deliver_task_result_sheets
 from core.llm_client import get_llm_config, test_llm_connection
 from core.pipeline import OUTPUT_FILENAMES
 from core.result_notifier import build_results_zip
@@ -522,12 +523,12 @@ def _show_final_export(task_dir: Path, review_dir: Path, *, session_id: str, can
             update_task_meta(task_dir, **updates)
             if meta.get("notify_type") == "feishu_custom_bot":
                 ensure_result_access(task_dir)
-                with st.spinner("正在向飞书群发送3个结果Excel……"):
-                    delivery = deliver_task_result_files(task_dir)
+                with st.spinner("正在创建3个飞书云表格并发送结果卡片……"):
+                    delivery = deliver_task_result_sheets(task_dir)
                 if delivery.get("success"):
-                    st.success("3个结果Excel已发送至飞书群。")
+                    st.success("3个飞书云表格已创建，结果卡片已发送至飞书群。")
                 else:
-                    st.warning(f"本地结果已生成，但飞书群文件发送失败：{delivery.get('last_error') or '未知错误'}")
+                    st.warning(f"本地结果已生成，但飞书云表格交付失败：{delivery.get('last_error') or '未知错误'}")
             st.success("最终审核结果已生成。")
             st.dataframe(pd.DataFrame([{"指标": k, "数量": v} for k, v in stats.items()]), hide_index=True, use_container_width=True)
         except Exception as exc:  # noqa: BLE001

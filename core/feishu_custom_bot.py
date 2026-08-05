@@ -34,10 +34,31 @@ class FeishuCustomBotClient:
         if not self.webhook.startswith("https://"):
             raise FeishuCustomBotError("飞书自定义机器人Webhook未配置或不是HTTPS地址")
 
-    def send_card(self, title: str, markdown: str, *, button_text: str = "", button_url: str = "") -> None:
+    def send_card(
+        self,
+        title: str,
+        markdown: str,
+        *,
+        button_text: str = "",
+        button_url: str = "",
+        buttons: list[dict[str, str]] | None = None,
+    ) -> None:
         elements: list[dict[str, Any]] = [{"tag": "markdown", "content": markdown}]
-        if button_text and button_url:
-            elements.append({"tag": "action", "actions": [{"tag": "button", "text": {"tag": "plain_text", "content": button_text}, "type": "primary", "url": button_url}]})
+        actions = []
+        for button in buttons or []:
+            text = str(button.get("text") or "").strip()
+            url = str(button.get("url") or "").strip()
+            if text and url:
+                actions.append({
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": text},
+                    "type": str(button.get("type") or "default"),
+                    "url": url,
+                })
+        if not actions and button_text and button_url:
+            actions.append({"tag": "button", "text": {"tag": "plain_text", "content": button_text}, "type": "primary", "url": button_url})
+        if actions:
+            elements.append({"tag": "action", "actions": actions})
         card = {"config": {"wide_screen_mode": True}, "header": {"title": {"tag": "plain_text", "content": title}, "template": "blue"}, "elements": elements}
         self._send({"msg_type": "interactive", "card": card})
 
