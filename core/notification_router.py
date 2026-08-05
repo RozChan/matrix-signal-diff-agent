@@ -287,9 +287,7 @@ def scan_custom_notifications(custom_client: FeishuCustomBotClient | None = None
             else:
                 notify_review_ready(tdir, custom_client=custom_client)
         elif meta.get("status") in {"final_exported", "delivered"}:
-            if os.getenv("FEISHU_DOC_DELIVERY_ENABLED", "false").strip().lower() == "true" and meta.get("status") == "final_exported":
-                from .feishu_doc_service import publish_task_result_document
+            if meta.get("status") == "final_exported":
+                from .feishu_file_delivery import deliver_task_result_files
 
-                publish_task_result_document(tdir, notify=True)
-            else:
-                notify_result_ready(tdir, custom_client=custom_client)
+                deliver_task_result_files(tdir)

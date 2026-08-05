@@ -8,8 +8,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 
+from core.ai_review import SOURCE_SHEETS
 from core.final_export import export_final_review_result
 from core.review_history import (
     admin_set_history_enabled,
@@ -39,6 +40,18 @@ def _item(item_id: str, *, description_51: str = "Inactive", with_unit: bool = F
         "field_diffs": diffs,
         "signal_ai_judgement": "疑似可忽略",
     }
+
+
+def _compare_file(path: Path, item: dict) -> Path:
+    workbook = Workbook()
+    workbook.active.title = SOURCE_SHEETS[0]
+    workbook.create_sheet(SOURCE_SHEETS[1])
+    for sheet_name in SOURCE_SHEETS:
+        workbook[sheet_name].append(["4.0信号名", "5.1信号名", "差异点list"])
+    workbook[SOURCE_SHEETS[0]].append([item["signal_40"], item["signal_51"], "差异"])
+    workbook.save(path)
+    workbook.close()
+    return path
 
 
 def _save_task_decisions(task_dir: Path, task_id: str, item: dict, results: dict[str, str]) -> None:
@@ -76,10 +89,16 @@ def test_exact_history_is_applied_to_new_task(tmp_path: Path) -> None:
     items_path = second / "review" / "review_items.json"
     items_path.write_text(json.dumps([item], ensure_ascii=False), encoding="utf-8")
     output = tmp_path / "history-result.xlsx"
-    export_final_review_result(items_path, second / "review" / "review_state.json", output)
+    export_final_review_result(
+        items_path,
+        second / "review" / "review_state.json",
+        output,
+        compare_file_path=_compare_file(tmp_path / "history-source.xlsx", item),
+    )
     workbook = load_workbook(output, read_only=True)
     try:
-        assert workbook["审核明细全量"].cell(2, 10).value == "历史人工"
+        headers = [cell.value for cell in workbook[SOURCE_SHEETS[0]][1]]
+        assert workbook[SOURCE_SHEETS[0]].cell(2, headers.index("判断来源") + 1).value == "人工"
     finally:
         workbook.close()
 

@@ -216,17 +216,24 @@ def test_notification_failure_is_recorded_without_failing_task(tmp_path: Path) -
     assert "webhook unavailable" in meta["custom_bot_started_last_error"]
 
 
-def test_custom_notification_scan_resumes_document_delivery(tmp_path: Path, monkeypatch) -> None:
+def test_custom_notification_scan_resumes_direct_file_delivery(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("TASK_ROOT_DIR", str(tmp_path))
-    monkeypatch.setenv("FEISHU_DOC_DELIVERY_ENABLED", "true")
     tdir = task(tmp_path)
     update_task_meta(tdir, status="final_exported")
     calls = []
-    monkeypatch.setattr("core.feishu_doc_service.publish_task_result_document", lambda task_dir, notify=True: calls.append((task_dir, notify)) or {"success": True})
+    monkeypatch.setattr("core.feishu_file_delivery.deliver_task_result_files", lambda task_dir: calls.append(task_dir) or {"success": True})
 
-    scan_custom_notifications(FakeCustomClient())
+    client = FakeCustomClient()
+    scan_custom_notifications(client)
 
-    assert calls == [(tdir, True)]
+    assert calls == [tdir]
+    assert client.cards == []
+
+
+def test_review_page_does_not_expose_server_final_result_path() -> None:
+    source = (Path(__file__).resolve().parents[1] / "app.py").read_text(encoding="utf-8")
+    assert "最终审核结果文件已存在" not in source
+    assert 'st.success(f"已生成：{final_path}")' not in source
 
 
 def test_enterprise_task_does_not_use_custom_bot(tmp_path: Path) -> None:
