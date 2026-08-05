@@ -6,7 +6,12 @@ from openpyxl import Workbook, load_workbook
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from core.final_export import FINAL_RESULT_HEADERS, SHEET_RULES, export_final_review_result
+from core.final_export import (
+    FINAL_COLUMN_WIDTHS,
+    FINAL_RESULT_HEADERS,
+    SHEET_RULES,
+    export_final_review_result,
+)
 from core.ai_review import AI_REVIEW_SHEET, SOURCE_SHEETS, is_text_only_ai_candidate
 from core.review_store import acquire_review_lock, create_task_meta, init_review_state, save_review_state, update_review_field
 
@@ -40,6 +45,9 @@ def _compare_workbook(path: Path, items: list[dict]) -> None:
     for sheet_name in SOURCE_SHEETS:
         ws = workbook.create_sheet(sheet_name)
         ws.append(headers)
+        ws.column_dimensions["A"].width = 36
+        ws.column_dimensions["B"].width = 36
+        ws.column_dimensions["C"].width = 95
         for item in items:
             if item["source_sheet"] == sheet_name:
                 ws.append([item["signal_40"], item["signal_51"], "差异内容", "保留值"])
@@ -86,7 +94,7 @@ def test_final_export_keeps_two_source_sheets_and_adds_signal_decisions(tmp_path
     _compare_workbook(compare, items)
     stats = export_final_review_result(items_path, review_dir / "review_state.json", output, compare_file_path=compare)
     assert stats == {"判断结果-相同": 0, "判断结果-不同": 2, "判断来源-人工": 1, "判断来源-系统": 1, "审核信号总数": 2}
-    wb = load_workbook(output, read_only=True)
+    wb = load_workbook(output)
     try:
         assert wb.sheetnames == SHEET_RULES
         assert AI_REVIEW_SHEET not in wb.sheetnames
@@ -98,6 +106,11 @@ def test_final_export_keeps_two_source_sheets_and_adds_signal_decisions(tmp_path
             assert ws.cell(2, diff_index + 2).value == "不同"
             assert ws.cell(2, diff_index + 3).value == expected_source
             assert ws.cell(2, diff_index + 4).value == "保留值"
+            header_columns = {cell.value: cell.column_letter for cell in ws[1]}
+            assert {
+                header: ws.column_dimensions[header_columns[header]].width
+                for header in FINAL_COLUMN_WIDTHS
+            } == FINAL_COLUMN_WIDTHS
     finally:
         wb.close()
 
