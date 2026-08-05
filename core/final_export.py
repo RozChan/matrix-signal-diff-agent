@@ -19,6 +19,11 @@ FINAL_REVIEW_FILENAME = "人工审核后最终差异结果.xlsx"
 RESULT_HEADER = "判断结果"
 SOURCE_HEADER = "判断来源"
 FINAL_RESULT_HEADERS = (RESULT_HEADER, SOURCE_HEADER)
+FINAL_COLUMN_WIDTHS = {
+    SIGNAL_40_HEADER: 24,
+    SIGNAL_51_HEADER: 24,
+    DIFF_LIST_HEADER: 48,
+}
 # Backward-compatible name used by older diagnostics; final delivery now keeps
 # exactly the original two comparison sheets.
 SHEET_RULES = list(SOURCE_SHEETS)
@@ -113,6 +118,14 @@ def _style_result_columns(ws, result_col: int, source_col: int) -> None:
     ws.auto_filter.ref = ws.dimensions
 
 
+def _compact_final_columns(ws) -> None:
+    headers = _header_map(ws)
+    for header, width in FINAL_COLUMN_WIDTHS.items():
+        column = headers.get(header)
+        if column:
+            ws.column_dimensions[ws.cell(1, column).column_letter].width = width
+
+
 def _source_compare_path(output_path: Path, compare_file_path: Path | None) -> Path:
     source = Path(compare_file_path) if compare_file_path is not None else output_path.parent / OUTPUT_FILENAMES["compare"]
     if not source.is_file():
@@ -166,6 +179,7 @@ def export_final_review_result(
                 stats[f"判断来源-{source}"] += 1
                 stats["审核信号总数"] += 1
             _style_result_columns(ws, result_col, source_col)
+            _compact_final_columns(ws)
 
         remaining = sum(len(queue) for queue in decisions.values())
         if remaining:

@@ -75,7 +75,13 @@ def _payload(data: dict[str, Any]) -> dict[str, Any]:
     return dict(payload) if data.get("ok") is not None and isinstance(payload, dict) else data
 
 
-def _run_cli(args: list[str], *, timeout: int, stage: str) -> dict[str, Any]:
+def _run_cli(
+    args: list[str],
+    *,
+    timeout: int,
+    stage: str,
+    cwd: Path | None = None,
+) -> dict[str, Any]:
     cli_path, _folder_token = _environment()
     command = [cli_path, *args]
     try:
@@ -88,6 +94,7 @@ def _run_cli(args: list[str], *, timeout: int, stage: str) -> dict[str, Any]:
             timeout=timeout,
             check=False,
             shell=False,
+            cwd=str(cwd) if cwd is not None else None,
         )
     except subprocess.TimeoutExpired as exc:
         raise FeishuSheetDeliveryError(
@@ -130,14 +137,17 @@ def _import_result(payload: dict[str, Any]) -> dict[str, str]:
 
 
 def _start_import(path: Path, title: str, folder_token: str) -> dict[str, str]:
+    path = Path(path).resolve()
+    relative_path = f".\\{path.name}" if os.name == "nt" else f"./{path.name}"
     payload = _run_cli(
         [
-            "drive", "+import", "--file", str(path), "--type", "sheet",
+            "drive", "+import", "--file", relative_path, "--type", "sheet",
             "--folder-token", folder_token, "--name", title,
             "--as", "user", "--format", "json",
         ],
         timeout=int(os.getenv("FEISHU_SHEET_IMPORT_COMMAND_TIMEOUT_SECONDS", "240")),
         stage="spreadsheet_import",
+        cwd=path.parent,
     )
     return _import_result(payload)
 

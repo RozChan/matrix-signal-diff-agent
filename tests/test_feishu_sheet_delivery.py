@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -63,9 +64,11 @@ def _task(tmp_path: Path, monkeypatch) -> Path:
     return tdir
 
 
-def _success_runner(calls: list[list[str]]):
-    def run(command, **_kwargs):
+def _success_runner(calls: list[list[str]], run_options: list[dict] | None = None):
+    def run(command, **kwargs):
         calls.append(command)
+        if run_options is not None:
+            run_options.append(kwargs)
         if "+import" in command:
             index = sum("+import" in item for item in calls)
             payload = {
@@ -89,7 +92,8 @@ def _success_runner(calls: list[list[str]]):
 def test_three_workbooks_become_editable_cloud_sheets_and_one_card(tmp_path: Path, monkeypatch) -> None:
     tdir = _task(tmp_path, monkeypatch)
     calls: list[list[str]] = []
-    monkeypatch.setattr(subprocess, "run", _success_runner(calls))
+    run_options: list[dict] = []
+    monkeypatch.setattr(subprocess, "run", _success_runner(calls, run_options))
     client = FakeCustomClient()
 
     result = deliver_task_result_sheets(tdir, custom_client=client)
@@ -99,6 +103,14 @@ def test_three_workbooks_become_editable_cloud_sheets_and_one_card(tmp_path: Pat
     permissions = [call for call in calls if "permission.public" in call]
     assert len(imports) == 3
     assert len(permissions) == 3
+    import_indexes = [index for index, call in enumerate(calls) if "+import" in call]
+    expected_prefix = ".\\" if os.name == "nt" else "./"
+    assert all(call[call.index("--file") + 1].startswith(expected_prefix) for call in imports)
+    assert all(not Path(call[call.index("--file") + 1]).is_absolute() for call in imports)
+    assert all(
+        Path(run_options[index]["cwd"]) == (tdir / "bot" / "feishu_result_files").resolve()
+        for index in import_indexes
+    )
     assert all(call[call.index("--folder-token") + 1] == "folder-token" for call in imports)
     assert [call[call.index("--name") + 1] for call in imports] == [
         Path(name).stem for name in delivery_file_names(load_task_meta(tdir)).values()
