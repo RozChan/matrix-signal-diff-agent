@@ -220,9 +220,7 @@ def notify_result_ready(task_dir: Path, *, custom_client: FeishuCustomBotClient 
         text = (
             f"任务编号：{meta.get('task_id', tdir.name)}\n"
             f"完成时间：{beijing_time(meta.get('review_completed_at'))}\n"
-            "最终结果状态：已生成\n"
-            "飞书云表格数量：3\n"
-            "权限：Chery组织内获得链接的人可编辑"
+            "最终结果状态：已生成"
         )
         labels = {
             "full_40": "打开EEA4.0全量清单",
