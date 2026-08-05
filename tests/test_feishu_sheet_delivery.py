@@ -120,6 +120,9 @@ def test_three_workbooks_become_editable_cloud_sheets_and_one_card(tmp_path: Pat
     assert len(client.cards) == 1
     assert len(client.cards[0][2]["buttons"]) == 3
     assert all(button["url"].startswith("https://example.feishu.cn/sheets/") for button in client.cards[0][2]["buttons"])
+    assert "最终结果状态：已生成" in client.cards[0][1]
+    assert "飞书云表格数量" not in client.cards[0][1]
+    assert "Chery组织内获得链接的人可编辑" not in client.cards[0][1]
     meta = load_task_meta(tdir)
     assert meta["status"] == "delivered"
     assert meta["result_delivery_status"] == "delivered"
