@@ -95,13 +95,14 @@ def _custom_once(
     *,
     button_text: str = "",
     button_url: str = "",
+    buttons: list[dict[str, str]] | None = None,
     client: FeishuCustomBotClient | None = None,
     force: bool = False,
     content_sensitive: bool = False,
 ) -> bool:
     tdir = Path(task_dir)
     prefix = f"custom_bot_{event}"
-    fingerprint = hashlib.sha256(json.dumps([title, markdown, button_text, button_url], ensure_ascii=False).encode("utf-8")).hexdigest()
+    fingerprint = hashlib.sha256(json.dumps([title, markdown, button_text, button_url, buttons or []], ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
     claim_path = _acquire_notification_claim(tdir, prefix)
     if claim_path is None:
         current = load_task_meta(tdir)
@@ -130,7 +131,11 @@ def _custom_once(
                 },
             )
         try:
-            (client or FeishuCustomBotClient()).send_card(title, markdown, button_text=button_text, button_url=button_url)
+            sender = client or FeishuCustomBotClient()
+            if buttons:
+                sender.send_card(title, markdown, buttons=buttons)
+            else:
+                sender.send_card(title, markdown, button_text=button_text, button_url=button_url)
         except Exception as exc:  # noqa: BLE001
             update_task_meta(tdir, **{f"{prefix}_status": "failed", f"{prefix}_last_error": str(exc)})
             return False
@@ -197,6 +202,70 @@ def notify_result_ready(task_dir: Path, *, custom_client: FeishuCustomBotClient 
     tdir = Path(task_dir)
     meta = load_task_meta(tdir)
     if notification_channel(meta) != "feishu_custom_bot" or meta.get("status") not in {"final_exported", "delivered"}:
+        return False
+    sheet_delivery = dict(meta.get("feishu_sheet_delivery") or {})
+    sheet_enabled = os.getenv("FEISHU_RESULT_SHEET_DELIVERY_ENABLED", "true").strip().lower() == "true"
+    spreadsheets = dict(sheet_delivery.get("spreadsheets") or {})
+    sheet_keys = ("full_40", "full_51", "compare_final")
+    sheets_ready = (
+        sheet_delivery.get("status") in {"ready", "delivered"}
+        and all(
+            (spreadsheets.get(key) or {}).get("status") == "success"
+            and str((spreadsheets.get(key) or {}).get("url") or "").startswith("https://")
+            and (spreadsheets.get(key) or {}).get("permission_status") == "tenant_editable"
+            for key in sheet_keys
+        )
+    )
+    if sheet_enabled and sheets_ready:
+        text = (
+            f"任务编号：{meta.get('task_id', tdir.name)}\n"
+            f"完成时间：{beijing_time(meta.get('review_completed_at'))}\n"
+            "最终结果状态：已生成\n"
+            "飞书云表格数量：3\n"
+            "权限：Chery组织内获得链接的人可编辑"
+        )
+        labels = {
+            "full_40": "打开EEA4.0全量清单",
+            "full_51": "打开EEA5.1全量清单",
+            "compare_final": "打开同名信号差异结果",
+        }
+        buttons = [
+            {"text": labels[key], "url": str(spreadsheets[key]["url"]), "type": "primary" if key == "compare_final" else "default"}
+            for key in sheet_keys
+        ]
+        return _custom_once(
+            tdir,
+            "result_ready",
+            "信号矩阵全量对比最终结果已生成",
+            text,
+            buttons=buttons,
+            client=custom_client,
+            force=force,
+            content_sensitive=True,
+        )
+    if sheet_enabled and sheet_delivery.get("status") == "failed":
+        meta = ensure_result_access(tdir)
+        error = str(sheet_delivery.get("last_error") or meta.get("delivery_error") or "未知错误")[:800]
+        text = (
+            f"任务编号：{meta.get('task_id', tdir.name)}\n"
+            f"完成时间：{beijing_time(meta.get('review_completed_at'))}\n"
+            "最终文件状态：已生成\n"
+            "飞书云表格交付状态：失败\n"
+            f"失败原因：{error}\n"
+            "本地结果仍已保留，可从结果下载页获取。"
+        )
+        return _custom_once(
+            tdir,
+            "result_ready",
+            "信号矩阵全量对比最终结果已生成",
+            text,
+            button_text="进入结果下载页",
+            button_url=str(meta.get("result_url") or ""),
+            client=custom_client,
+            force=force,
+            content_sensitive=True,
+        )
+    if sheet_enabled:
         return False
     delivery = dict(meta.get("feishu_delivery") or {})
     doc_enabled = os.getenv("FEISHU_DOC_DELIVERY_ENABLED", "false").strip().lower() == "true"
@@ -288,6 +357,6 @@ def scan_custom_notifications(custom_client: FeishuCustomBotClient | None = None
                 notify_review_ready(tdir, custom_client=custom_client)
         elif meta.get("status") in {"final_exported", "delivered"}:
             if meta.get("status") == "final_exported":
-                from .feishu_file_delivery import deliver_task_result_files
+                from .feishu_sheet_delivery import deliver_task_result_sheets
 
-                deliver_task_result_files(tdir)
+                deliver_task_result_sheets(tdir, custom_client=custom_client)

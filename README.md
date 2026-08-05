@@ -918,24 +918,26 @@ python tools\verify_aggrid_manual_save.py
 
 “系统判定真实差异”仍只收录至少含一个数值差异的信号，但每行会展示该信号的全部差异字段及4.0/5.1值，包括伴随的信号值描述和单位差异。
 
-### 飞书群结果文件交付
+### 飞书云表格结果卡片交付
 
-最终人工审核结果生成后，系统直接向指定飞书群发送三份Excel，不再创建结果云文档，也不再发送“最终结果已生成”的汇总卡片：
+最终人工审核结果生成后，系统使用现有 `lark-cli` 用户授权，把三份正式Excel串行导入为三个飞书云表格，然后由群自定义Webhook机器人发送一张带三个跳转按钮的结果卡片。该流程不要求企业应用机器人加入群，也不再直接向群发送文件：
 
 ```env
-FEISHU_RESULT_FILE_DELIVERY_ENABLED=true
-FEISHU_RESULT_CHAT_ID=oc_xxxxxxxxxxxxxxxx
-FEISHU_FILE_SEND_MODE=openapi
-FEISHU_APP_ID=<app-id>
-FEISHU_APP_SECRET=<app-secret>
+LARK_CLI_PATH=C:\path\to\lark-cli.exe
+FEISHU_RESULT_FOLDER_TOKEN=<target-folder-token>
+FEISHU_RESULT_SHEET_DELIVERY_ENABLED=true
+FEISHU_RESULT_FILE_DELIVERY_ENABLED=false
+FEISHU_DOC_DELIVERY_ENABLED=false
+FEISHU_CUSTOM_BOT_ENABLED=true
+FEISHU_CUSTOM_BOT_WEBHOOK=<custom-bot-webhook>
 EEA40_BASELINE=26R1
 EEA51_BASELINE=26R2
 ```
 
-`FEISHU_FILE_SEND_MODE=openapi` 使用现有企业应用的文件上传和群消息权限；如果工作站已验证 `lark-cli im +messages-send --file`，也可设为 `lark_cli` 并配置 `LARK_CLI_PATH`。自定义Webhook机器人仍只负责“任务开始”和“人工审核就绪”两条卡片，本身不能上传本地Excel。
+每个云表格使用 `lark-cli drive +import --type sheet --folder-token ... --as user` 创建。创建成功后调用 `drive permission.public patch`，将 `link_share_entity` 设置为 `tenant_editable`，即“Chery组织内获得链接的人可编辑”。只有三个云表格均创建成功且权限设置成功后，才发送成功卡片。首次部署或授权失效时，需要在公司工作站执行 `lark-cli auth login`，为当前用户补齐云文档导入、云空间访问和修改云文档权限所需授权；若借用应用本身未开放相应scope，程序会保留本地结果并在任务状态中记录飞书返回的明确错误。
 
-三份群文件名称为：`YYYYMMDD_<4.0基线>_EEA4.0全量信号矩阵清单.xlsx`、`YYYYMMDD_<5.1基线>_EEA5.1全量信号矩阵清单.xlsx`、`YYYYMMDD_EEA4.0和EEA5.1同名信号差异提取.xlsx`。日期使用北京时间且只保留年月日；基线优先从任务字段或 `EEA40_BASELINE`/`EEA51_BASELINE` 读取，也可从配置的Confluence父页面URL自动识别。三份文件逐项记录飞书消息ID，失败重试只补发未成功的文件。
+三个云表格标题分别为：`YYYYMMDD_<4.0基线>_EEA4.0全量信号矩阵清单`、`YYYYMMDD_<5.1基线>_EEA5.1全量信号矩阵清单`、`YYYYMMDD_EEA4.0和EEA5.1同名信号差异提取`。日期使用北京时间且只保留年月日；基线优先从任务字段或 `EEA40_BASELINE`/`EEA51_BASELINE` 读取，也可从配置的Confluence父页面URL自动识别。每张表的导入ticket、token、URL和权限状态都会写入任务meta。重试会复用已创建的云表格，只继续轮询未完成ticket、重试失败的权限设置或创建尚未开始的表，不会重复创建已成功项目。
 
 当历史人工结论或系统判定已经覆盖全部审核字段、`pending_manual_count=0` 时，任务会跳过人工审核通知，自动生成最终结果并直接进入上述第三阶段交付。仍有任何待确认项时继续使用原有AG Grid人工审核流程。自动生成默认最多尝试3次，可通过 `AUTO_FINALIZE_MAX_ATTEMPTS` 调整；失败后也可在管理员页面点击“继续生成零待审核任务的最终结果”进行强制重试。进程重启后，通知扫描会恢复尚未完成的零待审核任务。
 
-公司Windows工作站验收时，先确认企业应用机器人已在目标群内，并配置 `FEISHU_RESULT_CHAT_ID` 及选定发送方式所需凭据。随后完成一项测试任务，确认群里只出现三份Excel、没有最终汇总卡片和飞书结果文档；再人为制造一次单文件发送失败，从管理员页面重试，确认只补发失败文件。本地结果下载页应始终保留。
+公司Windows工作站验收时，先确认 `LARK_CLI_PATH`、用户授权、目标文件夹权限和自定义机器人Webhook均有效。随后完成一项测试任务，确认目标文件夹出现三个云表格、群里只出现一张含三个按钮的结果卡片、三个按钮均能打开对应表格，并在分享设置中看到“组织内获得链接的人可编辑”。再人为制造一次第二张表权限设置失败，从管理员页面重试，确认第一张表不重复创建且失败步骤能够续跑。本地结果下载页应始终保留。

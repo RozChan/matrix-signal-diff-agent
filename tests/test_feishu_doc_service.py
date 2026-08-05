@@ -68,6 +68,7 @@ def _task(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("LARK_CLI_PATH", str(cli))
     monkeypatch.setenv("FEISHU_RESULT_FOLDER_TOKEN", "folder-token")
     monkeypatch.setenv("FEISHU_DOC_DELIVERY_ENABLED", "true")
+    monkeypatch.setenv("FEISHU_RESULT_SHEET_DELIVERY_ENABLED", "false")
     return tdir
 
 

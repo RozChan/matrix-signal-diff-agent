@@ -85,7 +85,7 @@ def test_all_history_covered_task_skips_review_and_generates_final_result(
     tdir = _task(tmp_path, reviewed=True)
     deliveries: list[Path] = []
     monkeypatch.setattr(
-        "core.feishu_file_delivery.deliver_task_result_files",
+        "core.feishu_sheet_delivery.deliver_task_result_sheets",
         lambda task_dir, **_kwargs: deliveries.append(Path(task_dir)) or {"success": True},
     )
 
