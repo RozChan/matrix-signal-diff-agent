@@ -50,8 +50,23 @@ def _task(tmp_path: Path, *, reviewed: bool) -> Path:
     compare.active.title = SOURCE_SHEETS[0]
     compare.create_sheet(SOURCE_SHEETS[1])
     for sheet_name in SOURCE_SHEETS:
-        compare[sheet_name].append(["4.0信号名", "5.1信号名", "差异点list"])
-    compare[SOURCE_SHEETS[0]].append([item["signal_40"], item["signal_51"], "信号值描述差异"])
+        headers = ["4.0信号名", "5.1信号名"]
+        if sheet_name == SOURCE_SHEETS[1]:
+            headers.append("去前缀后匹配名")
+        headers.append("差异点list")
+        for field in (
+            "信号长度", "精度", "偏移量", "物理最小值", "物理最大值", "单位", "信号值描述",
+            "信号来源文件", "ECU收发状态_原始", "ECU收发状态_标准化", "发送ECU汇总", "接收ECU汇总",
+        ):
+            headers.extend((f"4.0_{field}", f"5.1_{field}"))
+        compare[sheet_name].append(headers)
+    exact = compare[SOURCE_SHEETS[0]]
+    row = [""] * exact.max_column
+    headers = [cell.value for cell in exact[1]]
+    row[headers.index("4.0信号名")] = item["signal_40"]
+    row[headers.index("5.1信号名")] = item["signal_51"]
+    row[headers.index("差异点list")] = "信号值描述差异"
+    exact.append(row)
     compare.save(output_dir / OUTPUT_FILENAMES["compare"])
     compare.close()
     (review_dir / "review_items.json").parent.mkdir(parents=True, exist_ok=True)
@@ -97,8 +112,9 @@ def test_all_history_covered_task_skips_review_and_generates_final_result(
     workbook = load_workbook(final_path, read_only=True)
     try:
         assert workbook.sheetnames == SHEET_RULES
-        assert workbook[SOURCE_SHEETS[0]].cell(2, 4).value == "相同"
-        assert workbook[SOURCE_SHEETS[0]].cell(2, 5).value == "人工"
+        assert workbook[SOURCE_SHEETS[0]].max_row == 1
+        headers = [cell.value for cell in workbook[SOURCE_SHEETS[0]][1]]
+        assert "判断结果" in headers and "判断来源" in headers
     finally:
         workbook.close()
     meta = load_task_meta(tdir)

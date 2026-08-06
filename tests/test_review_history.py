@@ -47,8 +47,23 @@ def _compare_file(path: Path, item: dict) -> Path:
     workbook.active.title = SOURCE_SHEETS[0]
     workbook.create_sheet(SOURCE_SHEETS[1])
     for sheet_name in SOURCE_SHEETS:
-        workbook[sheet_name].append(["4.0信号名", "5.1信号名", "差异点list"])
-    workbook[SOURCE_SHEETS[0]].append([item["signal_40"], item["signal_51"], "差异"])
+        headers = ["4.0信号名", "5.1信号名"]
+        if sheet_name == SOURCE_SHEETS[1]:
+            headers.append("去前缀后匹配名")
+        headers.append("差异点list")
+        for field in (
+            "信号长度", "精度", "偏移量", "物理最小值", "物理最大值", "单位", "信号值描述",
+            "信号来源文件", "ECU收发状态_原始", "ECU收发状态_标准化", "发送ECU汇总", "接收ECU汇总",
+        ):
+            headers.extend((f"4.0_{field}", f"5.1_{field}"))
+        workbook[sheet_name].append(headers)
+    exact = workbook[SOURCE_SHEETS[0]]
+    row = [""] * exact.max_column
+    headers = [cell.value for cell in exact[1]]
+    row[headers.index("4.0信号名")] = item["signal_40"]
+    row[headers.index("5.1信号名")] = item["signal_51"]
+    row[headers.index("差异点list")] = "差异"
+    exact.append(row)
     workbook.save(path)
     workbook.close()
     return path
