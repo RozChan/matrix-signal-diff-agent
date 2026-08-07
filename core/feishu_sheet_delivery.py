@@ -256,7 +256,7 @@ def _notify(task_dir: Path, delivery: dict[str, Any], *, custom_client: Any | No
     notified = notify_result_ready(task_dir, custom_client=custom_client, force=force)
     delivery["card_status"] = "sent" if notified else "failed"
     if not notified:
-        delivery["last_error"] = "三个云表格已创建，但结果通知或链接消息发送失败"
+        delivery["last_error"] = "三个云表格已创建，但结果卡片发送失败"
     _save(task_dir, delivery)
     return notified
 
@@ -267,7 +267,7 @@ def deliver_task_result_sheets(
     custom_client: Any | None = None,
     force_notification: bool = False,
 ) -> dict[str, Any]:
-    """Create or resume three cloud sheets, then send one card and three links."""
+    """Create or resume three cloud sheets, set link editing, then send one card."""
 
     tdir = Path(task_dir).resolve()
     if not _enabled():

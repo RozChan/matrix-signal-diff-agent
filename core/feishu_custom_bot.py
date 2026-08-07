@@ -62,10 +62,6 @@ class FeishuCustomBotClient:
         card = {"config": {"wide_screen_mode": True}, "header": {"title": {"tag": "plain_text", "content": title}, "template": "blue"}, "elements": elements}
         self._send({"msg_type": "interactive", "card": card})
 
-    def send_text(self, text: str) -> None:
-        """Send one ordinary group message through the custom-bot webhook."""
-        self._send({"msg_type": "text", "content": {"text": str(text)}})
-
     def _send(self, payload: dict[str, Any]) -> None:
         if self.secret:
             timestamp = int(time.time())
