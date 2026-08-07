@@ -47,12 +47,18 @@ class FakeSession:
 class FakeCustomClient:
     def __init__(self, fail=False):
         self.cards = []
+        self.texts = []
         self.fail = fail
 
     def send_card(self, title, markdown, **kwargs):
         if self.fail:
             raise RuntimeError("webhook unavailable")
         self.cards.append((title, markdown, kwargs))
+
+    def send_text(self, text):
+        if self.fail:
+            raise RuntimeError("webhook unavailable")
+        self.texts.append(text)
 
 
 def task(tmp_path: Path, trigger="email_auto") -> Path:
@@ -73,6 +79,19 @@ def test_custom_bot_signature_and_success(monkeypatch) -> None:
     assert len(session.calls) == 1
     assert session.calls[0][1]["msg_type"] == "interactive"
     assert "sign" in session.calls[0][1]
+
+
+def test_custom_bot_sends_plain_text_message(monkeypatch) -> None:
+    monkeypatch.setenv("FEISHU_CUSTOM_BOT_ENABLED", "true")
+    session = FakeSession()
+    client = FeishuCustomBotClient("https://example.test/hook/redacted", "", session)
+
+    client.send_text("https://example.feishu.cn/sheets/example")
+
+    assert session.calls[0][1] == {
+        "msg_type": "text",
+        "content": {"text": "https://example.feishu.cn/sheets/example"},
+    }
 
 
 def test_custom_bot_card_supports_three_cloud_sheet_buttons(monkeypatch) -> None:
