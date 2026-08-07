@@ -3,6 +3,8 @@ setlocal EnableExtensions
 chcp 65001 >nul
 cd /d "%~dp0"
 set "LOG_FILE=%~dp0start_demo.log"
+set "PYTHON_CMD=python"
+if exist ".venv\Scripts\python.exe" set "PYTHON_CMD=.venv\Scripts\python.exe"
 
 echo ========================================
 echo 启动 matrix-signal-diff-agent Demo
@@ -14,22 +16,24 @@ echo.
 echo [%date% %time%] start_demo.bat started > "%LOG_FILE%"
 echo Current dir: %cd% >> "%LOG_FILE%"
 
-where python >> "%LOG_FILE%" 2>&1
-if errorlevel 1 (
-    echo 未找到 python，请确认 Python 已安装并加入 PATH。
-    echo 未找到 python，请确认 Python 已安装并加入 PATH。>> "%LOG_FILE%"
-    goto fail
+if not exist ".venv\Scripts\python.exe" (
+    where python >> "%LOG_FILE%" 2>&1
+    if errorlevel 1 (
+        echo 未找到 python，请确认 Python 已安装并加入 PATH。
+        echo 未找到 python，请确认 Python 已安装并加入 PATH。>> "%LOG_FILE%"
+        goto fail
+    )
 )
 
-python --version
-python --version >> "%LOG_FILE%" 2>&1
+"%PYTHON_CMD%" --version
+"%PYTHON_CMD%" --version >> "%LOG_FILE%" 2>&1
 if errorlevel 1 (
     echo Python 无法正常运行，请检查安装。
     echo Python 无法正常运行，请检查安装。>> "%LOG_FILE%"
     goto fail
 )
 
-python -c "import streamlit" >nul 2>nul
+"%PYTHON_CMD%" -c "import streamlit" >nul 2>nul
 if errorlevel 1 (
     echo 未检测到 Streamlit。
     echo 请先双击运行 install_dependencies.bat 安装依赖。
@@ -37,9 +41,17 @@ if errorlevel 1 (
     goto fail
 )
 
+"%PYTHON_CMD%" -c "import importlib.metadata as m; assert m.version('streamlit-aggrid') == '1.1.9+manual.3', m.version('streamlit-aggrid')" >nul 2>nul
+if errorlevel 1 (
+    echo 未检测到项目专用 AG Grid manual.3 组件。
+    echo 请先双击运行 install_dependencies.bat，或重新执行 python -m pip install -r requirements.txt。
+    echo 未检测到 streamlit-aggrid 1.1.9+manual.3。>> "%LOG_FILE%"
+    goto fail
+)
+
 echo 正在根据 .env 中的 REVIEW_BASE_URL 启动 Streamlit，请稍候...
-echo python tools\run_streamlit.py >> "%LOG_FILE%"
-python tools\run_streamlit.py
+echo "%PYTHON_CMD%" tools\run_streamlit.py >> "%LOG_FILE%"
+"%PYTHON_CMD%" tools\run_streamlit.py
 set "EXIT_CODE=%ERRORLEVEL%"
 echo Streamlit exited with code %EXIT_CODE% >> "%LOG_FILE%"
 if not "%EXIT_CODE%"=="0" (

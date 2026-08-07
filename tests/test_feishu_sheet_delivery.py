@@ -118,8 +118,14 @@ def test_three_workbooks_become_editable_cloud_sheets_and_one_card(tmp_path: Pat
     assert all("--yes" in call and call[call.index("--as") + 1] == "user" for call in permissions)
     assert all(json.loads(call[call.index("--data") + 1]) == {"link_share_entity": "tenant_editable"} for call in permissions)
     assert len(client.cards) == 1
-    assert len(client.cards[0][2]["buttons"]) == 3
-    assert all(button["url"].startswith("https://example.feishu.cn/sheets/") for button in client.cards[0][2]["buttons"])
+    assert "buttons" not in client.cards[0][2]
+    markdown_lines = client.cards[0][1].splitlines()
+    assert markdown_lines[-3:] == [
+        "https://example.feishu.cn/sheets/sheet-token-3",
+        "https://example.feishu.cn/sheets/sheet-token-1",
+        "https://example.feishu.cn/sheets/sheet-token-2",
+    ]
+    assert all(not line.startswith("[") for line in markdown_lines[-3:])
     assert "最终结果状态：已生成" in client.cards[0][1]
     assert "飞书云表格数量" not in client.cards[0][1]
     assert "Chery组织内获得链接的人可编辑" not in client.cards[0][1]

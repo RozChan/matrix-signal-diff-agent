@@ -4,6 +4,8 @@ import os
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.mail_trigger_store import load_mail_state
@@ -11,6 +13,7 @@ from core.mail_watcher import MailWatcher
 
 
 def main() -> int:
+    load_dotenv(Path(__file__).resolve().parents[1] / ".env")
     if os.getenv("MAIL_WATCHER_ENABLED", "false").strip().lower() != "true":
         print("MAIL_WATCHER_ENABLED=false，邮件监听未启用。", file=sys.stderr)
         return 2

@@ -2,6 +2,8 @@
 setlocal EnableExtensions
 chcp 65001 >nul
 cd /d "%~dp0"
-python tools\run_streamlit.py
+set "PYTHON_CMD=python"
+if exist ".venv\Scripts\python.exe" set "PYTHON_CMD=.venv\Scripts\python.exe"
+"%PYTHON_CMD%" tools\run_streamlit.py
 pause
 endlocal

@@ -111,6 +111,26 @@ python -m streamlit run app.py
 
 启动后浏览器会打开本地 Streamlit 页面。
 
+### 新公司电脑首次部署（确保显示AG Grid保存按钮）
+
+复制完整GitHub开发仓库和原工作站的 `.env` 后，在项目根目录执行：
+
+```bat
+py -3.11 -m venv .venv
+.venv\Scripts\python.exe -m pip install --upgrade pip
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\python.exe -m pip install --force-reinstall --no-deps .\vendor\wheels\streamlit_aggrid-1.1.9+manual.3-py3-none-any.whl
+.venv\Scripts\python.exe -c "import importlib.metadata as m; print(m.version('streamlit-aggrid'))"
+.venv\Scripts\python.exe tools\run_streamlit.py
+```
+
+版本检查必须输出 `1.1.9+manual.3`。如果仍看不到红色“保存”按钮，先完全关闭旧的
+Streamlit进程，再重新执行最后一条命令，并在浏览器按 `Ctrl+F5` 清除旧组件缓存。
+不要从PyPI另装官方 `streamlit-aggrid==1.1.9`，否则会覆盖项目专用Manual组件。
+
+如果电脑没有 `py` 命令，可将第一条改为 `python -m venv .venv`。此后始终使用
+`.venv\Scripts\python.exe`，避免网页服务和邮件监测误用不同Python环境。
+
 ### Windows 双击闪退排查
 
 如果双击 `install_dependencies.bat` 或 `start_demo.bat` 后窗口一闪而过，通常不是业务脚本问题，常见原因包括：
@@ -602,7 +622,41 @@ REVIEW_BASE_URL=http://工作站内网IP:8501
 start_all.bat
 ```
 
-同时拉起内网 Streamlit 服务和飞书机器人窗口。
+同时拉起内网 Streamlit 服务和飞书机器人窗口；当 `.env` 中
+`MAIL_WATCHER_ENABLED=true` 时，还会启动独立邮件监测窗口。
+
+#### 4. 邮件监测模式（每30分钟检查一次）
+
+在 `.env` 中配置并启用：
+
+```env
+MAIL_WATCHER_ENABLED=true
+MAIL_PROVIDER=imap
+MAIL_IMAP_HOST=<公司邮箱IMAP地址>
+MAIL_IMAP_PORT=993
+MAIL_IMAP_USERNAME=<邮箱账号>
+MAIL_IMAP_PASSWORD=<邮箱密码或客户端专用密码>
+MAIL_IMAP_FOLDER=INBOX
+MAIL_POLL_INTERVAL_SECONDS=1800
+MAIL_TRIGGER_SENDER_EMAIL=fangyue2@mychery.com
+MAIL_TRIGGER_SUBJECT_KEYWORD=更新
+```
+
+单独启动邮件监测：
+
+```bat
+start_mail_watcher.bat
+```
+
+等价命令为：
+
+```bat
+python tools\run_mail_watcher.py
+```
+
+邮件监测是常驻独立进程，不能只启动 Streamlit。首次启动会建立当前邮箱UID基线，
+不会把已有历史邮件当作新任务；后续每1800秒检查一次新邮件。运行状态保存在
+`TASK_ROOT_DIR\runtime\mail_trigger_state.json`，升级代码时必须保留该运行数据。
 
 ### 环境变量
 
@@ -920,7 +974,7 @@ python tools\verify_aggrid_manual_save.py
 
 ### 飞书云表格结果卡片交付
 
-最终人工审核结果生成后，系统使用现有 `lark-cli` 用户授权，把三份正式Excel串行导入为三个飞书云表格，然后由群自定义Webhook机器人发送一张带三个跳转按钮的结果卡片。该流程不要求企业应用机器人加入群，也不再直接向群发送文件：
+最终人工审核结果生成后，系统使用现有 `lark-cli` 用户授权，把三份正式Excel串行导入为三个飞书云表格，然后由群自定义Webhook机器人在结果卡片正文中按行发送三个云表格URL。飞书客户端会把URL显示为可点击链接；卡片不再显示底部跳转按钮。该流程不要求企业应用机器人加入群，也不再直接向群发送文件：
 
 ```env
 LARK_CLI_PATH=C:\path\to\lark-cli.exe
@@ -940,4 +994,4 @@ EEA51_BASELINE=26R2
 
 当历史人工结论或系统判定已经覆盖全部审核字段、`pending_manual_count=0` 时，任务会跳过人工审核通知，自动生成最终结果并直接进入上述第三阶段交付。仍有任何待确认项时继续使用原有AG Grid人工审核流程。自动生成默认最多尝试3次，可通过 `AUTO_FINALIZE_MAX_ATTEMPTS` 调整；失败后也可在管理员页面点击“继续生成零待审核任务的最终结果”进行强制重试。进程重启后，通知扫描会恢复尚未完成的零待审核任务。
 
-公司Windows工作站验收时，先确认 `LARK_CLI_PATH`、用户授权、目标文件夹权限和自定义机器人Webhook均有效。随后完成一项测试任务，确认目标文件夹出现三个云表格、群里只出现一张含三个按钮的结果卡片、三个按钮均能打开对应表格，并在分享设置中看到“组织内获得链接的人可编辑”。再人为制造一次第二张表权限设置失败，从管理员页面重试，确认第一张表不重复创建且失败步骤能够续跑。本地结果下载页应始终保留。
+公司Windows工作站验收时，先确认 `LARK_CLI_PATH`、用户授权、目标文件夹权限和自定义机器人Webhook均有效。随后完成一项测试任务，确认目标文件夹出现三个云表格、群里只出现一张含三行可点击URL且没有底部按钮的结果卡片、三个链接均能打开对应表格，并在分享设置中看到“组织内获得链接的人可编辑”。再人为制造一次第二张表权限设置失败，从管理员页面重试，确认第一张表不重复创建且失败步骤能够续跑。本地结果下载页应始终保留。

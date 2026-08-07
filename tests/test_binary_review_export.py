@@ -7,9 +7,12 @@ from openpyxl import Workbook, load_workbook
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.final_export import (
+    DESCRIPTION_ANCHOR_HEADER,
     FINAL_COLUMN_WIDTHS,
     FINAL_RESULT_HEADERS,
     SHEET_RULES,
+    SOURCE_FILE_HEADERS,
+    SUMMARY_HEADERS,
     export_final_review_result,
 )
 from core.ai_review import AI_REVIEW_SHEET, SOURCE_SHEETS, is_text_only_ai_candidate
@@ -38,19 +41,44 @@ def _numeric_item() -> dict:
     }
 
 
+def _same_item() -> dict:
+    return {
+        "item_id": "signal-3", "source_sheet": "完全同名匹配对比结果", "signal_40": "Same40", "signal_51": "Same51",
+        "field_diffs": [
+            {"diff_field": "单位", "value_40": "km/h", "value_51": "kmh", "field_type": "text"},
+        ],
+        "signal_ai_judgement": "疑似可忽略", "signal_ai_reason": "单位表达等价",
+    }
+
+
 def _compare_workbook(path: Path, items: list[dict]) -> None:
     workbook = Workbook()
     workbook.remove(workbook.active)
-    headers = ["4.0信号名", "5.1信号名", "差异点list", "原始备注"]
+    compare_fields = ["信号长度", "精度", "偏移量", "物理最小值", "物理最大值", "单位", "信号值描述"]
+    extra_fields = ["信号来源文件", "ECU收发状态_原始", "ECU收发状态_标准化", "发送ECU汇总", "接收ECU汇总"]
     for sheet_name in SOURCE_SHEETS:
         ws = workbook.create_sheet(sheet_name)
+        headers = ["4.0信号名", "5.1信号名"]
+        if sheet_name == SOURCE_SHEETS[1]:
+            headers.append("去前缀后匹配名")
+        headers.append("差异点list")
+        for field in (*compare_fields, *extra_fields):
+            headers.extend((f"4.0_{field}", f"5.1_{field}"))
         ws.append(headers)
-        ws.column_dimensions["A"].width = 36
-        ws.column_dimensions["B"].width = 36
-        ws.column_dimensions["C"].width = 95
+        for column, header in enumerate(headers, start=1):
+            if "描述" in header or "差异点" in header or "ECU" in header or "来源" in header:
+                ws.column_dimensions[ws.cell(1, column).column_letter].width = 95
+            elif "信号名" in header:
+                ws.column_dimensions[ws.cell(1, column).column_letter].width = 36
+            else:
+                ws.column_dimensions[ws.cell(1, column).column_letter].width = 16
         for item in items:
             if item["source_sheet"] == sheet_name:
-                ws.append([item["signal_40"], item["signal_51"], "差异内容", "保留值"])
+                values = {header: f"{item['item_id']}-{header}" for header in headers}
+                values["4.0信号名"] = item["signal_40"]
+                values["5.1信号名"] = item["signal_51"]
+                values["差异点list"] = "差异内容"
+                ws.append([values[header] for header in headers])
     workbook.create_sheet(AI_REVIEW_SHEET).append(["内部AI明细"])
     path.parent.mkdir(parents=True, exist_ok=True)
     workbook.save(path)
@@ -81,11 +109,12 @@ def test_final_export_keeps_two_source_sheets_and_adds_signal_decisions(tmp_path
     task_dir = tmp_path / "task"
     review_dir = task_dir / "review"
     create_task_meta(task_dir, "task", status="reviewing")
-    items = [_text_item(), _numeric_item()]
+    items = [_text_item(), _numeric_item(), _same_item()]
     init_review_state(review_dir, "task", items)
     acquire_review_lock(task_dir, "session")
     update_review_field(review_dir, "task", "signal-1", "信号值描述", "different", base_revision=0, session_id="session")
     update_review_field(review_dir, "task", "signal-1", "单位", "same", base_revision=1, session_id="session")
+    update_review_field(review_dir, "task", "signal-3", "单位", "same", base_revision=2, session_id="session")
     items_path = review_dir / "review_items.json"
     items_path.parent.mkdir(parents=True, exist_ok=True)
     items_path.write_text(json.dumps(items, ensure_ascii=False), encoding="utf-8")
@@ -93,7 +122,7 @@ def test_final_export_keeps_two_source_sheets_and_adds_signal_decisions(tmp_path
     compare = tmp_path / "compare.xlsx"
     _compare_workbook(compare, items)
     stats = export_final_review_result(items_path, review_dir / "review_state.json", output, compare_file_path=compare)
-    assert stats == {"判断结果-相同": 0, "判断结果-不同": 2, "判断来源-人工": 1, "判断来源-系统": 1, "审核信号总数": 2}
+    assert stats == {"判断结果-相同": 1, "判断结果-不同": 2, "判断来源-人工": 2, "判断来源-系统": 1, "审核信号总数": 3}
     wb = load_workbook(output)
     try:
         assert wb.sheetnames == SHEET_RULES
@@ -105,12 +134,22 @@ def test_final_export_keeps_two_source_sheets_and_adds_signal_decisions(tmp_path
             assert tuple(headers[diff_index + 1:diff_index + 3]) == FINAL_RESULT_HEADERS
             assert ws.cell(2, diff_index + 2).value == "不同"
             assert ws.cell(2, diff_index + 3).value == expected_source
-            assert ws.cell(2, diff_index + 4).value == "保留值"
+            description_index = headers.index(DESCRIPTION_ANCHOR_HEADER)
+            assert tuple(headers[description_index + 1:description_index + 5]) == SUMMARY_HEADERS
+            assert tuple(headers[-2:]) == SOURCE_FILE_HEADERS
+            assert "相同" not in {
+                ws.cell(row, headers.index("判断结果") + 1).value
+                for row in range(2, ws.max_row + 1)
+            }
+            assert "Same40" not in {
+                ws.cell(row, headers.index("4.0信号名") + 1).value
+                for row in range(2, ws.max_row + 1)
+            }
             header_columns = {cell.value: cell.column_letter for cell in ws[1]}
             assert {
                 header: ws.column_dimensions[header_columns[header]].width
-                for header in FINAL_COLUMN_WIDTHS
-            } == FINAL_COLUMN_WIDTHS
+                for header in FINAL_COLUMN_WIDTHS if header in header_columns
+            } == {header: width for header, width in FINAL_COLUMN_WIDTHS.items() if header in header_columns}
     finally:
         wb.close()
 

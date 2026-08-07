@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict, deque
+from copy import copy
 from pathlib import Path
 from typing import Any
 
@@ -19,10 +20,35 @@ FINAL_REVIEW_FILENAME = "人工审核后最终差异结果.xlsx"
 RESULT_HEADER = "判断结果"
 SOURCE_HEADER = "判断来源"
 FINAL_RESULT_HEADERS = (RESULT_HEADER, SOURCE_HEADER)
+SUMMARY_HEADERS = (
+    "4.0_发送ECU汇总",
+    "5.1_发送ECU汇总",
+    "4.0_接收ECU汇总",
+    "5.1_接收ECU汇总",
+)
+SOURCE_FILE_HEADERS = ("4.0_信号来源文件", "5.1_信号来源文件")
+DESCRIPTION_ANCHOR_HEADER = "5.1_信号值描述"
 FINAL_COLUMN_WIDTHS = {
     SIGNAL_40_HEADER: 24,
     SIGNAL_51_HEADER: 24,
+    "去前缀后匹配名": 24,
     DIFF_LIST_HEADER: 48,
+    RESULT_HEADER: 12,
+    SOURCE_HEADER: 12,
+    "4.0_单位": 12,
+    "5.1_单位": 12,
+    "4.0_信号值描述": 36,
+    "5.1_信号值描述": 36,
+    "4.0_发送ECU汇总": 24,
+    "5.1_发送ECU汇总": 24,
+    "4.0_接收ECU汇总": 24,
+    "5.1_接收ECU汇总": 24,
+    "4.0_ECU收发状态_原始": 20,
+    "5.1_ECU收发状态_原始": 20,
+    "4.0_ECU收发状态_标准化": 18,
+    "5.1_ECU收发状态_标准化": 18,
+    "4.0_信号来源文件": 36,
+    "5.1_信号来源文件": 36,
 }
 # Backward-compatible name used by older diagnostics; final delivery now keeps
 # exactly the original two comparison sheets.
@@ -126,6 +152,52 @@ def _compact_final_columns(ws) -> None:
             ws.column_dimensions[ws.cell(1, column).column_letter].width = width
 
 
+def _reorder_final_columns(ws) -> None:
+    headers = [str(cell.value).strip() if cell.value is not None else "" for cell in ws[1]]
+    if len(headers) != len(set(headers)):
+        raise ValueError(f"Sheet {ws.title} 存在重复列名，无法重排")
+    required = (DESCRIPTION_ANCHOR_HEADER, *SUMMARY_HEADERS, *SOURCE_FILE_HEADERS)
+    missing = [header for header in required if header not in headers]
+    if missing:
+        raise ValueError(f"Sheet {ws.title} 缺少最终结果重排列：{'、'.join(missing)}")
+
+    moved = set(SUMMARY_HEADERS + SOURCE_FILE_HEADERS)
+    desired = [header for header in headers if header not in moved]
+    insert_at = desired.index(DESCRIPTION_ANCHOR_HEADER) + 1
+    desired[insert_at:insert_at] = list(SUMMARY_HEADERS)
+    desired.extend(SOURCE_FILE_HEADERS)
+    if desired == headers:
+        return
+
+    source_indexes = {header: index for index, header in enumerate(headers, start=1)}
+    cells: dict[str, list[tuple[Any, Any, Any, Any]]] = {}
+    dimensions: dict[str, dict[str, Any]] = {}
+    for header, source_index in source_indexes.items():
+        cells[header] = [
+            (cell.value, copy(cell._style), copy(cell.hyperlink), copy(cell.comment))
+            for cell in (ws.cell(row, source_index) for row in range(1, (ws.max_row or 1) + 1))
+        ]
+        source_dimension = ws.column_dimensions[ws.cell(1, source_index).column_letter]
+        dimensions[header] = {
+            "width": source_dimension.width,
+            "hidden": source_dimension.hidden,
+            "bestFit": source_dimension.bestFit,
+            "outlineLevel": source_dimension.outlineLevel,
+            "collapsed": source_dimension.collapsed,
+        }
+
+    for destination_index, header in enumerate(desired, start=1):
+        for row, (value, style, hyperlink, comment) in enumerate(cells[header], start=1):
+            target = ws.cell(row, destination_index)
+            target.value = value
+            target._style = copy(style)
+            target.hyperlink = copy(hyperlink)
+            target.comment = copy(comment)
+        destination_dimension = ws.column_dimensions[ws.cell(1, destination_index).column_letter]
+        for attribute, value in dimensions[header].items():
+            setattr(destination_dimension, attribute, value)
+
+
 def _source_compare_path(output_path: Path, compare_file_path: Path | None) -> Path:
     source = Path(compare_file_path) if compare_file_path is not None else output_path.parent / OUTPUT_FILENAMES["compare"]
     if not source.is_file():
@@ -163,6 +235,7 @@ def export_final_review_result(
             ws = workbook[sheet_name]
             result_col, source_col = _ensure_result_columns(ws)
             headers = _header_map(ws)
+            same_rows: list[int] = []
             for row in range(2, (ws.max_row or 1) + 1):
                 key = (
                     sheet_name,
@@ -178,7 +251,12 @@ def export_final_review_result(
                 stats[f"判断结果-{result}"] += 1
                 stats[f"判断来源-{source}"] += 1
                 stats["审核信号总数"] += 1
+                if result == "相同":
+                    same_rows.append(row)
+            for row in reversed(same_rows):
+                ws.delete_rows(row)
             _style_result_columns(ws, result_col, source_col)
+            _reorder_final_columns(ws)
             _compact_final_columns(ws)
 
         remaining = sum(len(queue) for queue in decisions.values())

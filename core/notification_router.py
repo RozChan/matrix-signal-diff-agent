@@ -217,26 +217,18 @@ def notify_result_ready(task_dir: Path, *, custom_client: FeishuCustomBotClient 
         )
     )
     if sheet_enabled and sheets_ready:
+        link_keys = ("compare_final", "full_40", "full_51")
         text = (
             f"任务编号：{meta.get('task_id', tdir.name)}\n"
             f"完成时间：{beijing_time(meta.get('review_completed_at'))}\n"
-            "最终结果状态：已生成"
+            "最终结果状态：已生成\n"
+            + "\n".join(str(spreadsheets[key]["url"]) for key in link_keys)
         )
-        labels = {
-            "full_40": "打开EEA4.0全量清单",
-            "full_51": "打开EEA5.1全量清单",
-            "compare_final": "打开同名信号差异结果",
-        }
-        buttons = [
-            {"text": labels[key], "url": str(spreadsheets[key]["url"]), "type": "primary" if key == "compare_final" else "default"}
-            for key in sheet_keys
-        ]
         return _custom_once(
             tdir,
             "result_ready",
             "信号矩阵全量对比最终结果已生成",
             text,
-            buttons=buttons,
             client=custom_client,
             force=force,
             content_sensitive=True,

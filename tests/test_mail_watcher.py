@@ -15,6 +15,7 @@ from core.full_compare_task import FullCompareBusyError, FullCompareTaskResult
 from core.imap_mail_client import ImapMailClient, ImapMailError, MailHeader, decode_mail_header
 from core.mail_trigger_store import load_mail_state
 from core.mail_watcher import MailWatcher, batch_trigger_id, mail_matches
+from tools import run_mail_watcher
 
 
 class FakeMailClient:
@@ -194,3 +195,15 @@ def test_imap_login_failure_does_not_expose_password(monkeypatch) -> None:
     with pytest.raises(ImapMailError) as exc:
         client.connect()
     assert "super-secret-password" not in str(exc.value)
+
+
+def test_mail_watcher_entry_loads_project_dotenv_before_configuration_check(monkeypatch) -> None:
+    loaded: list[Path] = []
+
+    def fake_load(path: Path) -> None:
+        loaded.append(Path(path))
+        monkeypatch.setenv("MAIL_WATCHER_ENABLED", "false")
+
+    monkeypatch.setattr(run_mail_watcher, "load_dotenv", fake_load)
+    assert run_mail_watcher.main() == 2
+    assert loaded == [Path(run_mail_watcher.__file__).resolve().parents[1] / ".env"]
