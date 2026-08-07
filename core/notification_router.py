@@ -23,6 +23,12 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _feishu_markdown_link(label: str, url: str) -> str:
+    """Render a named link for the markdown element in a Feishu card."""
+    safe_label = str(label).replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+    return f"[{safe_label}]({url})"
+
+
 def notification_channel(meta: dict[str, Any]) -> str:
     kind = str(meta.get("notify_type") or "")
     if kind == "feishu_custom_bot":
@@ -218,11 +224,23 @@ def notify_result_ready(task_dir: Path, *, custom_client: FeishuCustomBotClient 
     )
     if sheet_enabled and sheets_ready:
         link_keys = ("compare_final", "full_40", "full_51")
+        fallback_titles = {
+            "compare_final": "EEA4.0和EEA5.1同名信号差异提取",
+            "full_40": "EEA4.0全量信号矩阵清单",
+            "full_51": "EEA5.1全量信号矩阵清单",
+        }
+        links = []
+        for key in link_keys:
+            sheet = spreadsheets[key]
+            title = str(sheet.get("title") or "").strip()
+            if not title:
+                title = Path(str(sheet.get("display_name") or "")).stem or fallback_titles[key]
+            links.append(_feishu_markdown_link(title, str(sheet["url"])))
         text = (
             f"任务编号：{meta.get('task_id', tdir.name)}\n"
             f"完成时间：{beijing_time(meta.get('review_completed_at'))}\n"
             "最终结果状态：已生成\n"
-            + "\n".join(str(spreadsheets[key]["url"]) for key in link_keys)
+            + "\n".join(links)
         )
         return _custom_once(
             tdir,
