@@ -23,12 +23,6 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _feishu_markdown_link(label: str, url: str) -> str:
-    """Render a named link for the markdown element in a Feishu card."""
-    safe_label = str(label).replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
-    return f"[{safe_label}]({url})"
-
-
 def notification_channel(meta: dict[str, Any]) -> str:
     kind = str(meta.get("notify_type") or "")
     if kind == "feishu_custom_bot":
@@ -105,10 +99,12 @@ def _custom_once(
     client: FeishuCustomBotClient | None = None,
     force: bool = False,
     content_sensitive: bool = False,
+    text_only: bool = False,
 ) -> bool:
     tdir = Path(task_dir)
     prefix = f"custom_bot_{event}"
-    fingerprint = hashlib.sha256(json.dumps([title, markdown, button_text, button_url, buttons or []], ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+    fingerprint_value = ["text", markdown] if text_only else [title, markdown, button_text, button_url, buttons or []]
+    fingerprint = hashlib.sha256(json.dumps(fingerprint_value, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
     claim_path = _acquire_notification_claim(tdir, prefix)
     if claim_path is None:
         current = load_task_meta(tdir)
@@ -138,7 +134,9 @@ def _custom_once(
             )
         try:
             sender = client or FeishuCustomBotClient()
-            if buttons:
+            if text_only:
+                sender.send_text(markdown)
+            elif buttons:
                 sender.send_card(title, markdown, buttons=buttons)
             else:
                 sender.send_card(title, markdown, button_text=button_text, button_url=button_url)
@@ -224,25 +222,12 @@ def notify_result_ready(task_dir: Path, *, custom_client: FeishuCustomBotClient 
     )
     if sheet_enabled and sheets_ready:
         link_keys = ("compare_final", "full_40", "full_51")
-        fallback_titles = {
-            "compare_final": "EEA4.0和EEA5.1同名信号差异提取",
-            "full_40": "EEA4.0全量信号矩阵清单",
-            "full_51": "EEA5.1全量信号矩阵清单",
-        }
-        links = []
-        for key in link_keys:
-            sheet = spreadsheets[key]
-            title = str(sheet.get("title") or "").strip()
-            if not title:
-                title = Path(str(sheet.get("display_name") or "")).stem or fallback_titles[key]
-            links.append(_feishu_markdown_link(title, str(sheet["url"])))
         text = (
             f"任务编号：{meta.get('task_id', tdir.name)}\n"
             f"完成时间：{beijing_time(meta.get('review_completed_at'))}\n"
-            "最终结果状态：已生成\n"
-            + "\n".join(links)
+            "最终结果状态：已生成"
         )
-        return _custom_once(
+        if not _custom_once(
             tdir,
             "result_ready",
             "信号矩阵全量对比最终结果已生成",
@@ -250,7 +235,21 @@ def notify_result_ready(task_dir: Path, *, custom_client: FeishuCustomBotClient 
             client=custom_client,
             force=force,
             content_sensitive=True,
-        )
+        ):
+            return False
+        for key in link_keys:
+            if not _custom_once(
+                tdir,
+                f"result_link_{key}",
+                "",
+                str(spreadsheets[key]["url"]),
+                client=custom_client,
+                force=force,
+                content_sensitive=True,
+                text_only=True,
+            ):
+                return False
+        return True
     if sheet_enabled and sheet_delivery.get("status") == "failed":
         meta = ensure_result_access(tdir)
         error = str(sheet_delivery.get("last_error") or meta.get("delivery_error") or "未知错误")[:800]

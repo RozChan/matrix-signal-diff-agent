@@ -18,9 +18,13 @@ from core.review_store import create_task_meta, load_task_meta, update_task_meta
 class FakeCustomClient:
     def __init__(self) -> None:
         self.cards: list[tuple[str, str, dict]] = []
+        self.texts: list[str] = []
 
     def send_card(self, title: str, markdown: str, **kwargs) -> None:
         self.cards.append((title, markdown, kwargs))
+
+    def send_text(self, text: str) -> None:
+        self.texts.append(text)
 
 
 def _workbook(path: Path, *, final: bool = False) -> None:
@@ -89,7 +93,7 @@ def _success_runner(calls: list[list[str]], run_options: list[dict] | None = Non
     return run
 
 
-def test_three_workbooks_become_editable_cloud_sheets_and_one_card(tmp_path: Path, monkeypatch) -> None:
+def test_three_workbooks_become_editable_cloud_sheets_and_card_plus_link_messages(tmp_path: Path, monkeypatch) -> None:
     tdir = _task(tmp_path, monkeypatch)
     calls: list[list[str]] = []
     run_options: list[dict] = []
@@ -120,16 +124,16 @@ def test_three_workbooks_become_editable_cloud_sheets_and_one_card(tmp_path: Pat
     assert len(client.cards) == 1
     assert "buttons" not in client.cards[0][2]
     markdown_lines = client.cards[0][1].splitlines()
-    file_names = delivery_file_names(load_task_meta(tdir))
-    assert markdown_lines[-3:] == [
-        f"[{Path(file_names['compare_final']).stem}](https://example.feishu.cn/sheets/sheet-token-3)",
-        f"[{Path(file_names['full_40']).stem}](https://example.feishu.cn/sheets/sheet-token-1)",
-        f"[{Path(file_names['full_51']).stem}](https://example.feishu.cn/sheets/sheet-token-2)",
+    assert markdown_lines == [
+        f"任务编号：{tdir.name}",
+        "完成时间：2026-08-04 13:41:03",
+        "最终结果状态：已生成",
     ]
-    assert all(line.startswith("[") and "](" in line for line in markdown_lines[-3:])
-    assert "最终结果状态：已生成" in client.cards[0][1]
-    assert "飞书云表格数量" not in client.cards[0][1]
-    assert "Chery组织内获得链接的人可编辑" not in client.cards[0][1]
+    assert client.texts == [
+        "https://example.feishu.cn/sheets/sheet-token-3",
+        "https://example.feishu.cn/sheets/sheet-token-1",
+        "https://example.feishu.cn/sheets/sheet-token-2",
+    ]
     meta = load_task_meta(tdir)
     assert meta["status"] == "delivered"
     assert meta["result_delivery_status"] == "delivered"
@@ -139,6 +143,40 @@ def test_three_workbooks_become_editable_cloud_sheets_and_one_card(tmp_path: Pat
     assert repeated["success"] is True
     assert len(calls) == 6
     assert len(client.cards) == 1
+    assert len(client.texts) == 3
+
+
+def test_link_message_retry_resumes_without_repeating_sent_card_or_link(tmp_path: Path, monkeypatch) -> None:
+    tdir = _task(tmp_path, monkeypatch)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(subprocess, "run", _success_runner(calls))
+
+    class FailSecondTextOnce(FakeCustomClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.text_attempts = 0
+
+        def send_text(self, text: str) -> None:
+            self.text_attempts += 1
+            if self.text_attempts == 2:
+                raise RuntimeError("temporary webhook failure")
+            super().send_text(text)
+
+    client = FailSecondTextOnce()
+
+    first = deliver_task_result_sheets(tdir, custom_client=client)
+    assert first["success"] is False
+    assert len(client.cards) == 1
+    assert client.texts == ["https://example.feishu.cn/sheets/sheet-token-3"]
+
+    second = deliver_task_result_sheets(tdir, custom_client=client)
+    assert second["success"] is True
+    assert len(client.cards) == 1
+    assert client.texts == [
+        "https://example.feishu.cn/sheets/sheet-token-3",
+        "https://example.feishu.cn/sheets/sheet-token-1",
+        "https://example.feishu.cn/sheets/sheet-token-2",
+    ]
 
 
 def test_permission_failure_reuses_created_sheet_and_resumes_remaining(tmp_path: Path, monkeypatch) -> None:
